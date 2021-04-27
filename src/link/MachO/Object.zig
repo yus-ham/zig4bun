@@ -384,6 +384,9 @@ pub fn parseSymtab(self: *Object) !void {
                 if (self.arch.? == .aarch64 and mem.startsWith(u8, sym_name, "l")) continue;
                 break :tag .local;
             }
+            if (Symbol.isPext(sym)) {
+                break :tag .local;
+            }
             if (Symbol.isWeakDef(sym)) {
                 break :tag .weak;
             }
