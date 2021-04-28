@@ -59,7 +59,7 @@ pub const Section = struct {
     code: []u8,
     relocs: ?[]*Relocation,
 
-    pub fn deinit(self: *Section, allocator: *Allocator) void {
+    fn deinit(self: *Section, allocator: *Allocator) void {
         allocator.free(self.code);
 
         if (self.relocs) |relocs| {
@@ -96,7 +96,7 @@ const DebugInfo = struct {
     debug_line: []u8,
     debug_ranges: []u8,
 
-    pub fn parseFromObject(allocator: *Allocator, object: *const Object) !?DebugInfo {
+    fn parseFromObject(allocator: *Allocator, object: *const Object) !?DebugInfo {
         var debug_info = blk: {
             const index = object.dwarf_debug_info_index orelse return null;
             break :blk try object.readSection(allocator, index);
@@ -140,7 +140,7 @@ const DebugInfo = struct {
         };
     }
 
-    pub fn deinit(self: *DebugInfo, allocator: *Allocator) void {
+    fn deinit(self: *DebugInfo, allocator: *Allocator) void {
         allocator.free(self.debug_info);
         allocator.free(self.debug_abbrev);
         allocator.free(self.debug_str);
@@ -229,7 +229,7 @@ pub fn parse(self: *Object) !void {
     try self.parseDebugInfo();
 }
 
-pub fn readLoadCommands(self: *Object, reader: anytype) !void {
+fn readLoadCommands(self: *Object, reader: anytype) !void {
     const offset = self.file_offset orelse 0;
     try self.load_commands.ensureCapacity(self.allocator, self.header.?.ncmds);
 
@@ -297,7 +297,7 @@ pub fn readLoadCommands(self: *Object, reader: anytype) !void {
     }
 }
 
-pub fn parseSections(self: *Object) !void {
+fn parseSections(self: *Object) !void {
     log.debug("parsing sections in {s}", .{self.name.?});
     const seg = self.load_commands.items[self.segment_cmd_index.?].Segment;
 
@@ -334,7 +334,7 @@ pub fn parseSections(self: *Object) !void {
     }
 }
 
-pub fn parseInitializers(self: *Object) !void {
+fn parseInitializers(self: *Object) !void {
     const index = self.mod_init_func_section_index orelse return;
     const section = self.sections.items[index];
 
@@ -359,7 +359,7 @@ pub fn parseInitializers(self: *Object) !void {
     }
 }
 
-pub fn parseSymtab(self: *Object) !void {
+fn parseSymtab(self: *Object) !void {
     const symtab_cmd = self.load_commands.items[self.symtab_cmd_index.?].Symtab;
 
     var symtab = try self.allocator.alloc(u8, @sizeOf(macho.nlist_64) * symtab_cmd.nsyms);
@@ -404,7 +404,7 @@ pub fn parseSymtab(self: *Object) !void {
     }
 }
 
-pub fn parseDebugInfo(self: *Object) !void {
+fn parseDebugInfo(self: *Object) !void {
     var debug_info = blk: {
         var di = try DebugInfo.parseFromObject(self.allocator, self);
         break :blk di orelse return;
@@ -463,7 +463,7 @@ pub fn getString(self: *const Object, str_off: u32) []const u8 {
     return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + str_off));
 }
 
-pub fn readSection(self: Object, allocator: *Allocator, index: u16) ![]u8 {
+fn readSection(self: Object, allocator: *Allocator, index: u16) ![]u8 {
     const seg = self.load_commands.items[self.segment_cmd_index.?].Segment;
     const sect = seg.sections.items[index];
     var buffer = try allocator.alloc(u8, sect.size);
@@ -471,7 +471,7 @@ pub fn readSection(self: Object, allocator: *Allocator, index: u16) ![]u8 {
     return buffer;
 }
 
-pub fn readDataInCode(self: *Object) !void {
+fn readDataInCode(self: *Object) !void {
     const index = self.data_in_code_cmd_index orelse return;
     const data_in_code = self.load_commands.items[index].LinkeditData;
 
