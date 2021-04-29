@@ -12,7 +12,6 @@ const reloc = @import("reloc.zig");
 
 const Allocator = mem.Allocator;
 const Relocation = reloc.Relocation;
-const Symbol = @import("Symbol.zig");
 const parseName = @import("Zld.zig").parseName;
 
 usingnamespace @import("commands.zig");
@@ -36,126 +35,79 @@ data_in_code_cmd_index: ?u16 = null,
 text_section_index: ?u16 = null,
 mod_init_func_section_index: ?u16 = null,
 
-// __DWARF segment sections
 dwarf_debug_info_index: ?u16 = null,
 dwarf_debug_abbrev_index: ?u16 = null,
 dwarf_debug_str_index: ?u16 = null,
 dwarf_debug_line_index: ?u16 = null,
 dwarf_debug_ranges_index: ?u16 = null,
 
-symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
+symtab: std.ArrayListUnmanaged(Symbol) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
-locals: std.StringArrayHashMapUnmanaged(Symbol) = .{},
-stabs: std.ArrayListUnmanaged(Stab) = .{},
-tu_path: ?[]const u8 = null,
-tu_mtime: ?u64 = null,
-
-initializers: std.ArrayListUnmanaged(CppStatic) = .{},
-data_in_code_entries: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
+dice: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
 
 pub const Section = struct {
     inner: macho.section_64,
     code: []u8,
-    relocs: ?[]*Relocation,
+    relocs: []macho.relocation_info,
 
     fn deinit(self: *Section, allocator: *Allocator) void {
         allocator.free(self.code);
-
-        if (self.relocs) |relocs| {
-            for (relocs) |rel| {
-                allocator.destroy(rel);
-            }
-            allocator.free(relocs);
-        }
+        allocator.free(self.relocs);
     }
 };
 
-const CppStatic = struct {
-    symbol: u32,
-    target_addr: u64,
-};
-
-const Stab = struct {
+pub const Symbol = struct {
     tag: Tag,
-    symbol: u32,
-    size: ?u64 = null,
+    linkage: ?Linkage = null,
+    address: ?u64 = null,
+    section: ?u8 = null,
+    inner: macho.nlist_64,
 
-    const Tag = enum {
-        function,
-        global,
-        static,
+    pub const Tag = enum {
+        defined,
+        undef,
     };
-};
 
-const DebugInfo = struct {
-    inner: dwarf.DwarfInfo,
-    debug_info: []u8,
-    debug_abbrev: []u8,
-    debug_str: []u8,
-    debug_line: []u8,
-    debug_ranges: []u8,
+    pub const Linkage = enum {
+        translation_unit,
+        linkage_unit,
+        global,
+    };
 
-    fn parseFromObject(allocator: *Allocator, object: *const Object) !?DebugInfo {
-        var debug_info = blk: {
-            const index = object.dwarf_debug_info_index orelse return null;
-            break :blk try object.readSection(allocator, index);
-        };
-        var debug_abbrev = blk: {
-            const index = object.dwarf_debug_abbrev_index orelse return null;
-            break :blk try object.readSection(allocator, index);
-        };
-        var debug_str = blk: {
-            const index = object.dwarf_debug_str_index orelse return null;
-            break :blk try object.readSection(allocator, index);
-        };
-        var debug_line = blk: {
-            const index = object.dwarf_debug_line_index orelse return null;
-            break :blk try object.readSection(allocator, index);
-        };
-        var debug_ranges = blk: {
-            if (object.dwarf_debug_ranges_index) |ind| {
-                break :blk try object.readSection(allocator, ind);
-            }
-            break :blk try allocator.alloc(u8, 0);
-        };
-
-        var inner: dwarf.DwarfInfo = .{
-            .endian = .Little,
-            .debug_info = debug_info,
-            .debug_abbrev = debug_abbrev,
-            .debug_str = debug_str,
-            .debug_line = debug_line,
-            .debug_ranges = debug_ranges,
-        };
-        try dwarf.openDwarfDebugInfo(&inner, allocator);
-
-        return DebugInfo{
-            .inner = inner,
-            .debug_info = debug_info,
-            .debug_abbrev = debug_abbrev,
-            .debug_str = debug_str,
-            .debug_line = debug_line,
-            .debug_ranges = debug_ranges,
-        };
+    fn isStab(sym: macho.nlist_64) bool {
+        return (macho.N_STAB & sym.n_type) != 0;
     }
 
-    fn deinit(self: *DebugInfo, allocator: *Allocator) void {
-        allocator.free(self.debug_info);
-        allocator.free(self.debug_abbrev);
-        allocator.free(self.debug_str);
-        allocator.free(self.debug_line);
-        allocator.free(self.debug_ranges);
-        self.inner.abbrev_table_list.deinit();
-        self.inner.compile_unit_list.deinit();
-        self.inner.func_list.deinit();
+    fn isPrivateExt(sym: macho.nlist_64) bool {
+        return (macho.N_PEXT & sym.n_type) != 0;
+    }
+
+    fn isExt(sym: macho.nlist_64) bool {
+        return (macho.N_EXT & sym.n_type) != 0;
+    }
+
+    fn isSect(sym: macho.nlist_64) bool {
+        const type_ = macho.N_TYPE & sym.n_type;
+        return type_ == macho.N_SECT;
+    }
+
+    fn isUndef(sym: macho.nlist_64) bool {
+        const type_ = macho.N_TYPE & sym.n_type;
+        return type_ == macho.N_UNDF;
+    }
+
+    fn isWeakDef(sym: macho.nlist_64) bool {
+        return (sym.n_desc & macho.N_WEAK_DEF) != 0;
+    }
+
+    fn isWeakRef(sym: macho.nlist_64) bool {
+        return (sym.n_desc & macho.N_WEAK_REF) != 0;
     }
 };
 
 pub fn init(allocator: *Allocator) Object {
-    return .{
-        .allocator = allocator,
-    };
+    return .{ .allocator = allocator };
 }
 
 pub fn deinit(self: *Object) void {
@@ -169,23 +121,12 @@ pub fn deinit(self: *Object) void {
     }
     self.sections.deinit(self.allocator);
 
-    for (self.locals.items()) |*entry| {
-        entry.value.deinit(self.allocator);
-    }
-    self.locals.deinit(self.allocator);
-
     self.symtab.deinit(self.allocator);
     self.strtab.deinit(self.allocator);
-    self.stabs.deinit(self.allocator);
-    self.data_in_code_entries.deinit(self.allocator);
-    self.initializers.deinit(self.allocator);
+    self.dice.deinit(self.allocator);
 
     if (self.name) |n| {
         self.allocator.free(n);
-    }
-
-    if (self.tu_path) |tu_path| {
-        self.allocator.free(tu_path);
     }
 }
 
@@ -229,11 +170,12 @@ pub fn parse(self: *Object) !void {
     }
 
     try self.readLoadCommands(reader);
+
+    if (self.symtab_cmd_index == null) return;
+
+    try self.parseSymtab();
     try self.parseSections();
-    if (self.symtab_cmd_index != null) try self.parseSymtab();
-    if (self.data_in_code_cmd_index != null) try self.readDataInCode();
-    try self.parseInitializers();
-    try self.parseDebugInfo();
+    try self.parseDataInCode();
 }
 
 fn readLoadCommands(self: *Object, reader: anytype) !void {
@@ -305,64 +247,27 @@ fn readLoadCommands(self: *Object, reader: anytype) !void {
 }
 
 fn parseSections(self: *Object) !void {
-    log.debug("parsing sections in {s}", .{self.name.?});
-    const seg = self.load_commands.items[self.segment_cmd_index.?].Segment;
+    log.warn("parsing sections in {s}", .{self.name.?});
 
+    const seg = self.load_commands.items[self.segment_cmd_index.?].Segment;
     try self.sections.ensureCapacity(self.allocator, seg.sections.items.len);
 
     for (seg.sections.items) |sect| {
-        log.debug("parsing section '{s},{s}'", .{ parseName(&sect.segname), parseName(&sect.sectname) });
+        log.warn("parsing section '{s},{s}'", .{ parseName(&sect.segname), parseName(&sect.sectname) });
+
         // Read sections' code
         var code = try self.allocator.alloc(u8, sect.size);
         _ = try self.file.?.preadAll(code, sect.offset);
 
-        var section = Section{
+        // Read relocations
+        var relocs = try self.allocator.alloc(u8, @sizeOf(macho.relocation_info) * sect.nreloc);
+        _ = try self.file.?.preadAll(relocs, sect.reloff);
+
+        self.sections.appendAssumeCapacity(.{
             .inner = sect,
             .code = code,
-            .relocs = null,
-        };
-
-        // Parse relocations
-        if (sect.nreloc > 0) {
-            var raw_relocs = try self.allocator.alloc(u8, @sizeOf(macho.relocation_info) * sect.nreloc);
-            defer self.allocator.free(raw_relocs);
-
-            _ = try self.file.?.preadAll(raw_relocs, sect.reloff);
-
-            section.relocs = try reloc.parse(
-                self.allocator,
-                self.arch.?,
-                section.code,
-                mem.bytesAsSlice(macho.relocation_info, raw_relocs),
-            );
-        }
-
-        self.sections.appendAssumeCapacity(section);
-    }
-}
-
-fn parseInitializers(self: *Object) !void {
-    const index = self.mod_init_func_section_index orelse return;
-    const section = self.sections.items[index];
-
-    log.debug("parsing initializers in {s}", .{self.name.?});
-
-    // Parse C++ initializers
-    const relocs = section.relocs orelse unreachable;
-    try self.initializers.ensureCapacity(self.allocator, relocs.len);
-    for (relocs) |rel| {
-        self.initializers.appendAssumeCapacity(.{
-            .symbol = rel.target.symbol,
-            .target_addr = undefined,
+            .relocs = mem.bytesAsSlice(macho.relocation_info, relocs),
         });
-    }
-
-    mem.reverse(CppStatic, self.initializers.items);
-
-    for (self.initializers.items) |initializer| {
-        const sym = self.symtab.items[initializer.symbol];
-        const sym_name = self.getString(sym.n_strx);
-        log.debug("    | {s}", .{sym_name});
     }
 }
 
@@ -373,112 +278,39 @@ fn parseSymtab(self: *Object) !void {
     defer self.allocator.free(symtab);
 
     _ = try self.file.?.preadAll(symtab, symtab_cmd.symoff);
-    const slice = @alignCast(@alignOf(macho.nlist_64), mem.bytesAsSlice(macho.nlist_64, symtab));
-    try self.symtab.appendSlice(self.allocator, slice);
+    const nlists = @alignCast(@alignOf(macho.nlist_64), mem.bytesAsSlice(macho.nlist_64, symtab));
 
     var strtab = try self.allocator.alloc(u8, symtab_cmd.strsize);
     defer self.allocator.free(strtab);
 
     _ = try self.file.?.preadAll(strtab, symtab_cmd.stroff);
     try self.strtab.appendSlice(self.allocator, strtab);
+    try self.symtab.ensureCapacity(self.allocator, nlists.len);
 
-    for (self.symtab.items) |sym, sym_id| {
-        if (Symbol.isStab(sym) or Symbol.isUndef(sym)) continue;
-
-        const sym_name = self.getString(sym.n_strx);
-        const tag: Symbol.Tag = tag: {
-            if (Symbol.isLocal(sym)) {
-                if (self.arch.? == .aarch64 and mem.startsWith(u8, sym_name, "l")) continue;
-                break :tag .local;
+    for (nlists) |nlist| {
+        const tag: Symbol.Tag = if (Symbol.isSect(nlist)) .defined else .undef;
+        const linkage: ?Symbol.Linkage = linkage: {
+            if (Symbol.isUndef(nlist)) break :linkage null;
+            if (Symbol.isExt(nlist)) {
+                if (Symbol.isWeakDef(nlist) or Symbol.isPrivateExt(nlist)) break :linkage .linkage_unit;
+                break :linkage .global;
             }
-            if (Symbol.isPext(sym)) {
-                break :tag .local;
-            }
-            if (Symbol.isWeakDef(sym)) {
-                break :tag .weak;
-            }
-            break :tag .strong;
+            break :linkage .translation_unit;
         };
-        const name = try self.allocator.dupe(u8, sym_name);
+        const address: ?u64 = if (Symbol.isUndef(nlist)) null else nlist.n_value;
+        const section: ?u8 = if (Symbol.isUndef(nlist)) null else nlist.n_sect - 1;
 
-        try self.locals.putNoClobber(self.allocator, name, .{
+        self.symtab.appendAssumeCapacity(.{
             .tag = tag,
-            .name = name,
-            .address = 0,
-            .section = 0,
-            .index = @intCast(u32, sym_id),
+            .inner = nlist,
+            .linkage = linkage,
+            .address = address,
+            .section = section,
         });
     }
 }
 
-fn parseDebugInfo(self: *Object) !void {
-    var debug_info = blk: {
-        var di = try DebugInfo.parseFromObject(self.allocator, self);
-        break :blk di orelse return;
-    };
-    defer debug_info.deinit(self.allocator);
-
-    log.debug("parsing debug info in '{s}'", .{self.name.?});
-
-    // We assume there is only one CU.
-    const compile_unit = debug_info.inner.findCompileUnit(0x0) catch |err| switch (err) {
-        error.MissingDebugInfo => {
-            // TODO audit cases with missing debug info and audit our dwarf.zig module.
-            log.debug("invalid or missing debug info in {s}; skipping", .{self.name.?});
-            return;
-        },
-        else => |e| return e,
-    };
-    const name = try compile_unit.die.getAttrString(&debug_info.inner, dwarf.AT_name);
-    const comp_dir = try compile_unit.die.getAttrString(&debug_info.inner, dwarf.AT_comp_dir);
-
-    self.tu_path = try std.fs.path.join(self.allocator, &[_][]const u8{ comp_dir, name });
-    self.tu_mtime = mtime: {
-        var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        const stat = try self.file.?.stat();
-        break :mtime @intCast(u64, @divFloor(stat.mtime, 1_000_000_000));
-    };
-
-    for (self.locals.items()) |entry, index| {
-        const local = entry.value;
-        const source_sym = self.symtab.items[local.index.?];
-        const size = blk: for (debug_info.inner.func_list.items) |func| {
-            if (func.pc_range) |range| {
-                if (source_sym.n_value >= range.start and source_sym.n_value < range.end) {
-                    break :blk range.end - range.start;
-                }
-            }
-        } else null;
-        const tag: Stab.Tag = tag: {
-            if (size != null) break :tag .function;
-            switch (local.tag) {
-                .weak, .strong => break :tag .global,
-                else => break :tag .static,
-            }
-        };
-
-        try self.stabs.append(self.allocator, .{
-            .tag = tag,
-            .size = size,
-            .symbol = @intCast(u32, index),
-        });
-    }
-}
-
-pub fn getString(self: *const Object, str_off: u32) []const u8 {
-    assert(str_off < self.strtab.items.len);
-    return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + str_off));
-}
-
-fn readSection(self: Object, allocator: *Allocator, index: u16) ![]u8 {
-    const seg = self.load_commands.items[self.segment_cmd_index.?].Segment;
-    const sect = seg.sections.items[index];
-    var buffer = try allocator.alloc(u8, sect.size);
-    _ = try self.file.?.preadAll(buffer, sect.offset);
-    return buffer;
-}
-
-fn readDataInCode(self: *Object) !void {
+fn parseDataInCode(self: *Object) !void {
     const index = self.data_in_code_cmd_index orelse return;
     const data_in_code = self.load_commands.items[index].LinkeditData;
 
@@ -494,6 +326,30 @@ fn readDataInCode(self: *Object) !void {
             error.EndOfStream => break,
             else => |e| return e,
         };
-        try self.data_in_code_entries.append(self.allocator, dice);
+        try self.dice.append(self.allocator, dice);
+    }
+}
+
+pub fn getString(self: *const Object, str_off: u32) []const u8 {
+    assert(str_off < self.strtab.items.len);
+    return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + str_off));
+}
+
+pub fn printSymtab(self: Object) void {
+    log.warn("{s}: symtab", .{self.name.?});
+
+    for (self.symtab.items) |sym| {
+        const name = self.getString(sym.inner.n_strx);
+
+        switch (sym.tag) {
+            .undef => log.warn("    | {s} => {{ {s} }}", .{ name, sym.tag }),
+            .defined => log.warn("    | {s} => {{ {s}, {s}, 0x{x}, {} }}", .{
+                name,
+                sym.tag,
+                sym.linkage.?,
+                sym.address.?,
+                sym.section.?,
+            }),
+        }
     }
 }

@@ -215,20 +215,25 @@ pub fn link(self: *Zld, files: []const []const u8, out_path: []const u8) !void {
 
     try self.populateMetadata();
     try self.parseInputFiles(files);
-    try self.resolveSymbols();
-    try self.resolveStubsAndGotEntries();
-    try self.updateMetadata();
-    try self.sortSections();
-    try self.allocateTextSegment();
-    try self.allocateDataConstSegment();
-    try self.allocateDataSegment();
-    self.allocateLinkeditSegment();
-    try self.allocateSymbols();
-    try self.allocateStubsAndGotEntries();
-    try self.allocateCppStatics();
-    try self.writeStubHelperCommon();
-    try self.resolveRelocsAndWriteSections();
-    try self.flush();
+
+    for (self.objects.items) |object| {
+        object.printSymtab();
+    }
+    return error.Unfinished;
+    // try self.resolveSymbols();
+    // try self.resolveStubsAndGotEntries();
+    // try self.updateMetadata();
+    // try self.sortSections();
+    // try self.allocateTextSegment();
+    // try self.allocateDataConstSegment();
+    // try self.allocateDataSegment();
+    // self.allocateLinkeditSegment();
+    // try self.allocateSymbols();
+    // try self.allocateStubsAndGotEntries();
+    // try self.allocateCppStatics();
+    // try self.writeStubHelperCommon();
+    // try self.resolveRelocsAndWriteSections();
+    // try self.flush();
 }
 
 fn parseInputFiles(self: *Zld, files: []const []const u8) !void {
