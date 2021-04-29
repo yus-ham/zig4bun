@@ -207,6 +207,13 @@ pub fn parse(self: *Object) !void {
         log.err("invalid filetype: expected 0x{x}, found 0x{x}", .{ macho.MH_OBJECT, self.header.?.filetype });
         return error.MalformedObject;
     }
+    if (self.header.?.flags & macho.MH_SUBSECTIONS_VIA_SYMBOLS == 0) {
+        log.err(
+            "only objects compiled dead code stripping with flag MH_SUBSECTIONS_VIA_SYMBOLS are supported",
+            .{},
+        );
+        return error.UnsupportedObjectType;
+    }
 
     const this_arch: std.Target.Cpu.Arch = switch (self.header.?.cputype) {
         macho.CPU_TYPE_ARM64 => .aarch64,
