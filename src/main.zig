@@ -2030,7 +2030,7 @@ fn buildOutputType(
         .dll_export_fns = dll_export_fns,
         .object_format = object_format,
         .optimize_mode = optimize_mode,
-        .keep_source_files_loaded = false,
+        .keep_source_files_loaded = true,
         .clang_argv = clang_argv.items,
         .lld_argv = lld_argv.items,
         .lib_dirs = lib_dirs.items,

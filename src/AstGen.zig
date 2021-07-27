@@ -1,6 +1,8 @@
 //! Ingests an AST and produces ZIR code.
 const AstGen = @This();
 
+const JARRED_DISABLE_CHECK_UNUSED = true;
+
 const std = @import("std");
 const ast = std.zig.ast;
 const mem = std.mem;
@@ -2288,6 +2290,8 @@ fn checkUsed(
     outer_scope: *Scope,
     inner_scope: *Scope,
 ) InnerError!void {
+    if (JARRED_DISABLE_CHECK_UNUSED) return;
+
     const astgen = gz.astgen;
 
     var scope = inner_scope;
