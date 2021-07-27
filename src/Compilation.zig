@@ -1606,7 +1606,7 @@ fn releaseStage1Lock(comp: *Compilation) void {
 pub fn destroy(self: *Compilation) void {
     const optional_module = self.bin_file.options.module;
     self.bin_file.destroy();
-    if (optional_module) |module| module.deinit();
+    // if (optional_module) |module| module.deinit();
 
     self.releaseStage1Lock();
 

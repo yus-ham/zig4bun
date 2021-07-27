@@ -2814,7 +2814,12 @@ pub const LibExeObjStep = struct {
                         mem.eql(u8, entry.name, "zld.id") or
                         mem.eql(u8, entry.name, "lld.id")) continue;
 
-                    _ = try src_dir.updateFile(entry.name, dest_dir, entry.name, .{});
+                    _ = src_dir.updateFile(entry.name, dest_dir, entry.name, .{}) catch |err| {
+                        var stderr = std.io.getStdErr();
+                        var writer = stderr.writer();
+                        writer.print("\n{s} updating file {s}/{s}\n", .{ @errorName(err), output_dir, entry.name }) catch {};
+                        return err;
+                    };
                 }
             } else {
                 self.output_dir = build_output_dir;
