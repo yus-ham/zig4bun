@@ -6063,10 +6063,12 @@ Error type_has_bits2(CodeGen *g, ZigType *type_entry, bool *result) {
     return ErrorNone;
 }
 
-bool fn_returns_c_abi_small_struct(FnTypeId *fn_type_id) {
+bool fn_returns_sysv_small_struct(CodeGen *g, FnTypeId *fn_type_id) {
     ZigType *type = fn_type_id->return_type;
+    bool is_sysv = (g->zig_target->os != OsWindows && 
+                    g->zig_target->os != OsUefi);
     return !calling_convention_allows_zig_types(fn_type_id->cc) && 
-        type->id == ZigTypeIdStruct && type->abi_size <= 16;
+        type->id == ZigTypeIdStruct && type->abi_size <= 16 && is_sysv;
 }
 
 // Whether you can infer the value based solely on the type.
@@ -9640,7 +9642,7 @@ static void resolve_llvm_types_fn_type(CodeGen *g, ZigType *fn_type) {
         assert(gen_param_types.items[i] != nullptr);
     }
 
-    if (!first_arg_return && fn_returns_c_abi_small_struct(fn_type_id)) {
+    if (!first_arg_return && fn_returns_sysv_small_struct(g, fn_type_id)) {
         fn_type->data.fn.raw_type_ref = LLVMFunctionType(get_llvm_c_abi_type(g, gen_return_type),
                 gen_param_types.items, (unsigned int)gen_param_types.length, fn_type_id->is_var_args);
     } else {

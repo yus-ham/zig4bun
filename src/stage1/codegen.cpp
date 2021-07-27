@@ -2722,7 +2722,7 @@ static LLVMValueRef ir_render_return(CodeGen *g, Stage1Air *executable, Stage1Ai
         ZigType *return_type = instruction->operand->value->type;
         gen_assign_raw(g, g->cur_ret_ptr, get_pointer_to_type(g, return_type, false), value);
         LLVMBuildRetVoid(g->builder);
-    } else if (fn_returns_c_abi_small_struct(fn_type_id)) {
+    } else if (fn_returns_sysv_small_struct(g, fn_type_id)) {
         LLVMValueRef location = g->cur_fn->abi_return_value;
         if (instruction->operand == nullptr) {
             LLVMValueRef converted = gen_convert_to_c_abi(g, location, g->cur_ret_ptr);
@@ -4739,7 +4739,7 @@ static LLVMValueRef ir_render_call(CodeGen *g, Stage1Air *executable, Stage1AirI
     } else if (first_arg_ret) {
         ZigLLVMSetCallSret(result, get_llvm_type(g, src_return_type));
         return result_loc;
-    } else if (fn_returns_c_abi_small_struct(fn_type_id)) {
+    } else if (fn_returns_sysv_small_struct(g, fn_type_id)) {
         LLVMTypeRef abi_type = get_llvm_c_abi_type(g, src_return_type);
         LLVMTypeRef abi_type_ptr = LLVMPointerType(abi_type, 0);
         LLVMValueRef bitcast = LLVMBuildBitCast(g->builder, result_loc, abi_type_ptr, "");
@@ -8358,7 +8358,7 @@ static void do_code_gen(CodeGen *g) {
             g->cur_err_ret_trace_val_stack = nullptr;
         }
 
-        if (fn_returns_c_abi_small_struct(fn_type_id)) {
+        if (fn_returns_sysv_small_struct(g, fn_type_id)) {
             LLVMTypeRef abi_type = get_llvm_c_abi_type(g, fn_type_id->return_type);
             fn_table_entry->abi_return_value = LLVMBuildAlloca(g->builder, abi_type, "");
         }

@@ -54,7 +54,7 @@ uint32_t get_async_frame_align_bytes(CodeGen *g);
 bool type_has_bits(CodeGen *g, ZigType *type_entry);
 Error type_has_bits2(CodeGen *g, ZigType *type_entry, bool *result);
 
-bool fn_returns_c_abi_small_struct(FnTypeId *fn_type_id);
+bool fn_returns_sysv_small_struct(CodeGen *g, FnTypeId *fn_type_id);
 
 enum ExternPosition {
     ExternPositionFunctionParameter,
