@@ -708,6 +708,10 @@ pub const InitOptions = struct {
     disable_c_depfile: bool = false,
     linker_z_nodelete: bool = false,
     linker_z_defs: bool = false,
+    linker_z_origin: bool = false,
+    linker_z_noexecstack: bool = false,
+    linker_z_now: bool = false,
+    linker_z_relro: bool = false,
     linker_tsaware: bool = false,
     linker_nxcompat: bool = false,
     linker_dynamicbase: bool = false,
@@ -944,10 +948,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             if (options.sysroot) |sysroot| {
                 break :blk sysroot;
             } else if (darwin_can_use_system_sdk) {
-                // TODO Revisit this targeting versions lower than macOS 11 when LLVM 12 is out.
-                // See https://github.com/ziglang/zig/issues/6996
-                const at_least_big_sur = options.target.os.getVersionRange().semver.min.major >= 11;
-                break :blk if (at_least_big_sur) try std.zig.system.getSDKPath(arena) else null;
+                break :blk try std.zig.system.darwin.getSDKPath(arena, options.target);
             } else {
                 break :blk null;
             }
@@ -1029,7 +1030,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             options.target,
             options.is_native_abi,
             link_libc,
-            options.system_libs.len != 0,
+            options.system_libs.len != 0 or options.frameworks.len != 0,
             options.libc_installation,
         );
 
@@ -1229,6 +1230,12 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             } else main_pkg;
             errdefer if (options.is_test) root_pkg.destroy(gpa);
 
+            var other_pkg_iter = main_pkg.table.valueIterator();
+            while (other_pkg_iter.next()) |pkg| {
+                try pkg.*.add(gpa, "builtin", builtin_pkg);
+                try pkg.*.add(gpa, "std", std_pkg);
+            }
+
             try main_pkg.addAndAdopt(gpa, "builtin", builtin_pkg);
             try main_pkg.add(gpa, "root", root_pkg);
             try main_pkg.addAndAdopt(gpa, "std", std_pkg);
@@ -1379,6 +1386,10 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .bind_global_refs_locally = options.linker_bind_global_refs_locally orelse false,
             .z_nodelete = options.linker_z_nodelete,
             .z_defs = options.linker_z_defs,
+            .z_origin = options.linker_z_origin,
+            .z_noexecstack = options.linker_z_noexecstack,
+            .z_now = options.linker_z_now,
+            .z_relro = options.linker_z_relro,
             .tsaware = options.linker_tsaware,
             .nxcompat = options.linker_nxcompat,
             .dynamicbase = options.linker_dynamicbase,
@@ -1709,7 +1720,9 @@ pub fn update(self: *Compilation) !void {
         // in the start code, but when using the stage1 backend that won't happen,
         // so in order to run AstGen on the root source file we put it into the
         // import_table here.
-        if (use_stage1) {
+        // Likewise, in the case of `zig test`, the test runner is the root source file,
+        // and so there is nothing to import the main file.
+        if (use_stage1 or self.bin_file.options.is_test) {
             _ = try module.importPkg(module.main_pkg);
         }
 
@@ -1725,6 +1738,9 @@ pub fn update(self: *Compilation) !void {
 
         if (!use_stage1) {
             try self.work_queue.writeItem(.{ .analyze_pkg = std_pkg });
+            if (self.bin_file.options.is_test) {
+                try self.work_queue.writeItem(.{ .analyze_pkg = module.main_pkg });
+            }
         }
     }
 
@@ -1732,6 +1748,13 @@ pub fn update(self: *Compilation) !void {
 
     if (!use_stage1) {
         if (self.bin_file.options.module) |module| {
+            if (self.bin_file.options.is_test and self.totalErrorCount() == 0) {
+                // The `test_functions` decl has been intentionally postponed until now,
+                // at which point we must populate it with the list of test functions that
+                // have been discovered and not filtered out.
+                try module.populateTestFunctions();
+            }
+
             // Process the deletion set. We use a while loop here because the
             // deletion set may grow as we call `clearDecl` within this loop,
             // and more unreferenced Decls are revealed.
@@ -2049,28 +2072,19 @@ pub fn performAllTheWork(self: *Compilation) error{ TimerUnsupported, OutOfMemor
             .complete, .codegen_failure_retryable => {
                 if (build_options.omit_stage2)
                     @panic("sadly stage2 is omitted from this build to save memory on the CI server");
+
                 const module = self.bin_file.options.module.?;
                 assert(decl.has_tv);
                 assert(decl.ty.hasCodeGenBits());
 
-                self.bin_file.updateDecl(module, decl) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.AnalysisFail => {
-                        decl.analysis = .codegen_failure;
-                        continue;
-                    },
-                    else => {
-                        try module.failed_decls.ensureUnusedCapacity(gpa, 1);
-                        module.failed_decls.putAssumeCapacityNoClobber(decl, try Module.ErrorMsg.create(
-                            gpa,
-                            decl.srcLoc(),
-                            "unable to codegen: {s}",
-                            .{@errorName(err)},
-                        ));
-                        decl.analysis = .codegen_failure_retryable;
-                        continue;
-                    },
-                };
+                if (decl.alive) {
+                    try module.linkerUpdateDecl(decl);
+                    continue;
+                }
+
+                // Instead of sending this decl to the linker, we actually will delete it
+                // because we found out that it in fact was never referenced.
+                module.deleteUnusedDecl(decl);
             },
         },
         .codegen_func => |func| switch (func.owner_decl.analysis) {
@@ -2115,7 +2129,7 @@ pub fn performAllTheWork(self: *Compilation) error{ TimerUnsupported, OutOfMemor
                 if (builtin.mode == .Debug and self.verbose_air) {
                     std.debug.print("# Begin Function AIR: {s}:\n", .{decl.name});
                     @import("print_air.zig").dump(gpa, air, decl.namespace.file_scope.zir, liveness);
-                    std.debug.print("# End Function AIR: {s}:\n", .{decl.name});
+                    std.debug.print("# End Function AIR: {s}\n\n", .{decl.name});
                 }
 
                 self.bin_file.updateFunc(module, func, air, liveness) catch |err| switch (err) {
@@ -2402,7 +2416,7 @@ const AstGenSrc = union(enum) {
     root,
     import: struct {
         importing_file: *Module.Scope.File,
-        import_tok: std.zig.ast.TokenIndex,
+        import_tok: std.zig.Ast.TokenIndex,
     },
 };
 
@@ -2551,6 +2565,7 @@ pub fn cImport(comp: *Compilation, c_src: []const u8) !CImportResult {
         var argv = std.ArrayList([]const u8).init(comp.gpa);
         defer argv.deinit();
 
+        try argv.append(""); // argv[0] is program name, actual args start at [1]
         try comp.addTranslateCCArgs(arena, &argv, .c, out_dep_path);
 
         try argv.append(out_h_path);
@@ -3340,7 +3355,7 @@ pub fn hasSharedLibraryExt(filename: []const u8) bool {
         return true;
     }
     // Look for .so.X, .so.X.Y, .so.X.Y.Z
-    var it = mem.split(filename, ".");
+    var it = mem.split(u8, filename, ".");
     _ = it.next().?;
     var so_txt = it.next() orelse return false;
     while (!mem.eql(u8, so_txt, "so")) {
@@ -4085,7 +4100,7 @@ fn updateStage1Module(comp: *Compilation, main_progress_node: *std.Progress.Node
             };
 
             if (directory.handle.readFileAlloc(comp.gpa, libs_txt_basename, 10 * 1024 * 1024)) |libs_txt| {
-                var it = mem.tokenize(libs_txt, "\n");
+                var it = mem.tokenize(u8, libs_txt, "\n");
                 while (it.next()) |lib_name| {
                     try comp.stage1AddLinkLib(lib_name);
                 }

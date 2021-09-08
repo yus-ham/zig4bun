@@ -1124,6 +1124,7 @@ struct AstNodeContainerInitExpr {
 
 struct AstNodeIdentifier {
     Buf *name;
+    bool is_at_syntax;
 };
 
 struct AstNodeEnumLiteral {
@@ -1755,6 +1756,7 @@ enum BuiltinFnId {
     BuiltinFnIdIntToEnum,
     BuiltinFnIdVectorType,
     BuiltinFnIdShuffle,
+    BuiltinFnIdSelect,
     BuiltinFnIdSplat,
     BuiltinFnIdSetCold,
     BuiltinFnIdSetRuntimeSafety,
@@ -1795,6 +1797,12 @@ enum BuiltinFnId {
     BuiltinFnIdWasmMemoryGrow,
     BuiltinFnIdSrc,
     BuiltinFnIdReduce,
+    BuiltinFnIdMaximum,
+    BuiltinFnIdMinimum,
+    BuiltinFnIdSatAdd,
+    BuiltinFnIdSatSub,
+    BuiltinFnIdSatMul,
+    BuiltinFnIdSatShl,
 };
 
 struct BuiltinFnEntry {
@@ -2544,6 +2552,7 @@ enum Stage1ZirInstId : uint8_t {
     Stage1ZirInstIdBoolToInt,
     Stage1ZirInstIdVectorType,
     Stage1ZirInstIdShuffleVector,
+    Stage1ZirInstIdSelect,
     Stage1ZirInstIdSplat,
     Stage1ZirInstIdBoolNot,
     Stage1ZirInstIdMemset,
@@ -2664,6 +2673,7 @@ enum Stage1AirInstId : uint8_t {
     Stage1AirInstIdReduce,
     Stage1AirInstIdTruncate,
     Stage1AirInstIdShuffleVector,
+    Stage1AirInstIdSelect,
     Stage1AirInstIdSplat,
     Stage1AirInstIdBoolNot,
     Stage1AirInstIdMemset,
@@ -2935,6 +2945,12 @@ enum IrBinOp {
     IrBinOpRemMod,
     IrBinOpArrayCat,
     IrBinOpArrayMult,
+    IrBinOpMaximum,
+    IrBinOpMinimum,
+    IrBinOpSatAdd,
+    IrBinOpSatSub,
+    IrBinOpSatMul,
+    IrBinOpSatShl,
 };
 
 struct Stage1ZirInstBinOp {
@@ -4293,6 +4309,23 @@ struct Stage1AirInstShuffleVector {
     Stage1AirInst *a;
     Stage1AirInst *b;
     Stage1AirInst *mask; // This is in zig-format, not llvm format
+};
+
+struct Stage1ZirInstSelect {
+    Stage1ZirInst base;
+
+    Stage1ZirInst *scalar_type;
+    Stage1ZirInst *pred; // This is in zig-format, not llvm format
+    Stage1ZirInst *a;
+    Stage1ZirInst *b;
+};
+
+struct Stage1AirInstSelect {
+    Stage1AirInst base;
+
+    Stage1AirInst *pred;  // This is in zig-format, not llvm format
+    Stage1AirInst *a;
+    Stage1AirInst *b;
 };
 
 struct Stage1ZirInstSplat {

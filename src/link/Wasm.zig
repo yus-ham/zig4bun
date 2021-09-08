@@ -275,7 +275,7 @@ pub fn updateDecl(self: *Wasm, module: *Module, decl: *Module.Decl) !void {
     defer context.deinit();
 
     // generate the 'code' section for the function declaration
-    const result = context.gen(.{ .ty = decl.ty, .val = decl.val }) catch |err| switch (err) {
+    const result = context.gen(decl.ty, decl.val) catch |err| switch (err) {
         error.CodegenFail => {
             decl.analysis = .codegen_failure;
             try module.failed_decls.put(module.gpa, decl, context.err_msg);
@@ -330,10 +330,12 @@ pub fn updateDeclExports(
     decl: *const Module.Decl,
     exports: []const *Module.Export,
 ) !void {
-    _ = self;
-    _ = module;
-    _ = decl;
-    _ = exports;
+    if (build_options.skip_non_native and builtin.object_format != .wasm) {
+        @panic("Attempted to compile for object format that was disabled by build configuration");
+    }
+    if (build_options.have_llvm) {
+        if (self.llvm_object) |llvm_object| return llvm_object.updateDeclExports(module, decl, exports);
+    }
 }
 
 pub fn freeDecl(self: *Wasm, decl: *Module.Decl) void {
@@ -763,12 +765,8 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
             if (self.base.options.wasi_exec_model == .reactor) {
                 // Reactor execution model does not have _start so lld doesn't look for it.
                 try argv.append("--no-entry");
-                // Make sure "_initialize" is exported even if this is pure Zig WASI reactor
-                // where WASM_SYMBOL_EXPORTED flag in LLVM is not set on _initialize.
-                try argv.appendSlice(&[_][]const u8{
-                    "--export",
-                    "_initialize",
-                });
+                // Make sure "_initialize" and other used-defined functions are exported if this is WASI reactor.
+                try argv.append("--export-dynamic");
             }
         } else {
             try argv.append("--no-entry"); // So lld doesn't look for _start.

@@ -19,7 +19,6 @@ const DW = std.dwarf;
 const leb128 = std.leb;
 const log = std.log.scoped(.codegen);
 const build_options = @import("build_options");
-const LazySrcLoc = Module.LazySrcLoc;
 const RegisterManager = @import("register_manager.zig").RegisterManager;
 
 const X8664Encoder = @import("codegen/x86_64.zig").Encoder;
@@ -184,6 +183,7 @@ pub fn generateSymbol(
                 if (typed_value.val.castTag(.decl_ref)) |payload| {
                     const decl = payload.data;
                     if (decl.analysis != .complete) return error.AnalysisFail;
+                    decl.alive = true;
                     // TODO handle the dependency of this symbol on the decl's vaddr.
                     // If the decl changes vaddr, then this symbol needs to get regenerated.
                     const vaddr = bin_file.getDeclVAddr(decl);
@@ -802,13 +802,14 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
 
                 switch (air_tags[inst]) {
                     // zig fmt: off
-                    .add     => try self.airAdd(inst),
-                    .addwrap => try self.airAddWrap(inst),
-                    .sub     => try self.airSub(inst),
-                    .subwrap => try self.airSubWrap(inst),
-                    .mul     => try self.airMul(inst),
-                    .mulwrap => try self.airMulWrap(inst),
-                    .div     => try self.airDiv(inst),
+                    .add, .ptr_add => try self.airAdd(inst),
+                    .addwrap       => try self.airAddWrap(inst),
+                    .sub, .ptr_sub => try self.airSub(inst),
+                    .subwrap       => try self.airSubWrap(inst),
+                    .mul           => try self.airMul(inst),
+                    .mulwrap       => try self.airMulWrap(inst),
+                    .div           => try self.airDiv(inst),
+                    .rem           => try self.airRem(inst),
 
                     .cmp_lt  => try self.airCmp(inst, .lt),
                     .cmp_lte => try self.airCmp(inst, .lte),
@@ -822,6 +823,8 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     .bit_and  => try self.airBitAnd(inst),
                     .bit_or   => try self.airBitOr(inst),
                     .xor      => try self.airXor(inst),
+                    .shr      => try self.airShr(inst),
+                    .shl      => try self.airShl(inst),
 
                     .alloc           => try self.airAlloc(inst),
                     .arg             => try self.airArg(inst),
@@ -835,6 +838,8 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     .dbg_stmt        => try self.airDbgStmt(inst),
                     .floatcast       => try self.airFloatCast(inst),
                     .intcast         => try self.airIntCast(inst),
+                    .trunc           => try self.airTrunc(inst),
+                    .bool_to_int     => try self.airBoolToInt(inst),
                     .is_non_null     => try self.airIsNonNull(inst),
                     .is_non_null_ptr => try self.airIsNonNullPtr(inst),
                     .is_null         => try self.airIsNull(inst),
@@ -847,17 +852,25 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     .loop            => try self.airLoop(inst),
                     .not             => try self.airNot(inst),
                     .ptrtoint        => try self.airPtrToInt(inst),
-                    .ref             => try self.airRef(inst),
                     .ret             => try self.airRet(inst),
                     .store           => try self.airStore(inst),
                     .struct_field_ptr=> try self.airStructFieldPtr(inst),
+                    .struct_field_val=> try self.airStructFieldVal(inst),
+
+                    .struct_field_ptr_index_0 => try self.airStructFieldPtrIndex(inst, 0),
+                    .struct_field_ptr_index_1 => try self.airStructFieldPtrIndex(inst, 1),
+                    .struct_field_ptr_index_2 => try self.airStructFieldPtrIndex(inst, 2),
+                    .struct_field_ptr_index_3 => try self.airStructFieldPtrIndex(inst, 3),
+
                     .switch_br       => try self.airSwitch(inst),
-                    .varptr          => try self.airVarPtr(inst),
                     .slice_ptr       => try self.airSlicePtr(inst),
                     .slice_len       => try self.airSliceLen(inst),
 
                     .slice_elem_val      => try self.airSliceElemVal(inst),
                     .ptr_slice_elem_val  => try self.airPtrSliceElemVal(inst),
+                    .ptr_elem_val        => try self.airPtrElemVal(inst),
+                    .ptr_elem_ptr        => try self.airPtrElemPtr(inst),
+                    .ptr_ptr_elem_val    => try self.airPtrPtrElemVal(inst),
 
                     .constant => unreachable, // excluded from function bodies
                     .const_ty => unreachable, // excluded from function bodies
@@ -886,7 +899,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         fn dbgSetPrologueEnd(self: *Self) InnerError!void {
             switch (self.debug_output) {
                 .dwarf => |dbg_out| {
-                    try dbg_out.dbg_line.append(DW.LNS_set_prologue_end);
+                    try dbg_out.dbg_line.append(DW.LNS.set_prologue_end);
                     try self.dbgAdvancePCAndLine(self.prev_di_line, self.prev_di_column);
                 },
                 .none => {},
@@ -896,7 +909,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         fn dbgSetEpilogueBegin(self: *Self) InnerError!void {
             switch (self.debug_output) {
                 .dwarf => |dbg_out| {
-                    try dbg_out.dbg_line.append(DW.LNS_set_epilogue_begin);
+                    try dbg_out.dbg_line.append(DW.LNS.set_epilogue_begin);
                     try self.dbgAdvancePCAndLine(self.prev_di_line, self.prev_di_column);
                 },
                 .none => {},
@@ -912,13 +925,13 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     // It lets you emit single-byte opcodes that add different numbers to
                     // both the PC and the line number at the same time.
                     try dbg_out.dbg_line.ensureUnusedCapacity(11);
-                    dbg_out.dbg_line.appendAssumeCapacity(DW.LNS_advance_pc);
+                    dbg_out.dbg_line.appendAssumeCapacity(DW.LNS.advance_pc);
                     leb128.writeULEB128(dbg_out.dbg_line.writer(), delta_pc) catch unreachable;
                     if (delta_line != 0) {
-                        dbg_out.dbg_line.appendAssumeCapacity(DW.LNS_advance_line);
+                        dbg_out.dbg_line.appendAssumeCapacity(DW.LNS.advance_line);
                         leb128.writeILEB128(dbg_out.dbg_line.writer(), delta_line) catch unreachable;
                     }
-                    dbg_out.dbg_line.appendAssumeCapacity(DW.LNS_copy);
+                    dbg_out.dbg_line.appendAssumeCapacity(DW.LNS.copy);
                 },
                 .none => {},
             }
@@ -967,6 +980,20 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 log.debug("%{d} => {}", .{ inst, result });
                 const branch = &self.branch_stack.items[self.branch_stack.items.len - 1];
                 branch.inst_table.putAssumeCapacityNoClobber(inst, result);
+
+                switch (result) {
+                    .register => |reg| {
+                        // In some cases (such as bitcast), an operand
+                        // may be the same MCValue as the result. If
+                        // that operand died and was a register, it
+                        // was freed by processDeath. We have to
+                        // "re-allocate" the register.
+                        if (self.register_manager.isRegFree(reg)) {
+                            self.register_manager.getRegAssumeFree(reg, inst);
+                        }
+                    },
+                    else => {},
+                }
             }
             self.finishAirBookkeeping();
         }
@@ -983,7 +1010,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 .dwarf => |dbg_out| {
                     assert(ty.hasCodeGenBits());
                     const index = dbg_out.dbg_info.items.len;
-                    try dbg_out.dbg_info.resize(index + 4); // DW.AT_type,  DW.FORM_ref4
+                    try dbg_out.dbg_info.resize(index + 4); // DW.AT.type,  DW.FORM.ref4
 
                     const gop = try dbg_out.dbg_info_type_relocs.getOrPut(self.gpa, ty);
                     if (!gop.found_existing) {
@@ -1109,6 +1136,26 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
         }
 
+        fn airTrunc(self: *Self, inst: Air.Inst.Index) !void {
+            const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+            if (self.liveness.isUnused(inst))
+                return self.finishAir(inst, .dead, .{ ty_op.operand, .none, .none });
+
+            const operand = try self.resolveInst(ty_op.operand);
+            _ = operand;
+            const result: MCValue = switch (arch) {
+                else => return self.fail("TODO implement trunc for {}", .{self.target.cpu.arch}),
+            };
+            return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
+        }
+
+        fn airBoolToInt(self: *Self, inst: Air.Inst.Index) !void {
+            const un_op = self.air.instructions.items(.data)[inst].un_op;
+            const operand = try self.resolveInst(un_op);
+            const result: MCValue = if (self.liveness.isUnused(inst)) .dead else operand;
+            return self.finishAir(inst, result, .{ un_op, .none, .none });
+        }
+
         fn airNot(self: *Self, inst: Air.Inst.Index) !void {
             const ty_op = self.air.instructions.items(.data)[inst].ty_op;
             const result: MCValue = if (self.liveness.isUnused(inst)) .dead else result: {
@@ -1220,10 +1267,19 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
         }
 
+        fn airRem(self: *Self, inst: Air.Inst.Index) !void {
+            const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+            const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
+                else => return self.fail("TODO implement rem for {}", .{self.target.cpu.arch}),
+            };
+            return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
+        }
+
         fn airBitAnd(self: *Self, inst: Air.Inst.Index) !void {
             const bin_op = self.air.instructions.items(.data)[inst].bin_op;
             const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
                 .arm, .armeb => try self.genArmBinOp(inst, bin_op.lhs, bin_op.rhs, .bit_and),
+                .x86_64 => try self.genX8664BinMath(inst, bin_op.lhs, bin_op.rhs),
                 else => return self.fail("TODO implement bitwise and for {}", .{self.target.cpu.arch}),
             };
             return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
@@ -1233,6 +1289,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             const bin_op = self.air.instructions.items(.data)[inst].bin_op;
             const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
                 .arm, .armeb => try self.genArmBinOp(inst, bin_op.lhs, bin_op.rhs, .bit_or),
+                .x86_64 => try self.genX8664BinMath(inst, bin_op.lhs, bin_op.rhs),
                 else => return self.fail("TODO implement bitwise or for {}", .{self.target.cpu.arch}),
             };
             return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
@@ -1243,6 +1300,24 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
                 .arm, .armeb => try self.genArmBinOp(inst, bin_op.lhs, bin_op.rhs, .xor),
                 else => return self.fail("TODO implement xor for {}", .{self.target.cpu.arch}),
+            };
+            return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
+        }
+
+        fn airShl(self: *Self, inst: Air.Inst.Index) !void {
+            const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+            const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
+                .arm, .armeb => try self.genArmBinOp(inst, bin_op.lhs, bin_op.rhs, .shl),
+                else => return self.fail("TODO implement shl for {}", .{self.target.cpu.arch}),
+            };
+            return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
+        }
+
+        fn airShr(self: *Self, inst: Air.Inst.Index) !void {
+            const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+            const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
+                .arm, .armeb => try self.genArmBinOp(inst, bin_op.lhs, bin_op.rhs, .shr),
+                else => return self.fail("TODO implement shr for {}", .{self.target.cpu.arch}),
             };
             return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
         }
@@ -1331,13 +1406,6 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
         }
 
-        fn airVarPtr(self: *Self, inst: Air.Inst.Index) !void {
-            const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
-                else => return self.fail("TODO implement varptr for {}", .{self.target.cpu.arch}),
-            };
-            return self.finishAir(inst, result, .{ .none, .none, .none });
-        }
-
         fn airSlicePtr(self: *Self, inst: Air.Inst.Index) !void {
             const ty_op = self.air.instructions.items(.data)[inst].ty_op;
             const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
@@ -1355,17 +1423,46 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         }
 
         fn airSliceElemVal(self: *Self, inst: Air.Inst.Index) !void {
+            const is_volatile = false; // TODO
             const bin_op = self.air.instructions.items(.data)[inst].bin_op;
-            const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
+            const result: MCValue = if (!is_volatile and self.liveness.isUnused(inst)) .dead else switch (arch) {
                 else => return self.fail("TODO implement slice_elem_val for {}", .{self.target.cpu.arch}),
             };
             return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
         }
 
         fn airPtrSliceElemVal(self: *Self, inst: Air.Inst.Index) !void {
+            const is_volatile = false; // TODO
             const bin_op = self.air.instructions.items(.data)[inst].bin_op;
-            const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
+            const result: MCValue = if (!is_volatile and self.liveness.isUnused(inst)) .dead else switch (arch) {
                 else => return self.fail("TODO implement ptr_slice_elem_val for {}", .{self.target.cpu.arch}),
+            };
+            return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
+        }
+
+        fn airPtrElemVal(self: *Self, inst: Air.Inst.Index) !void {
+            const is_volatile = false; // TODO
+            const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+            const result: MCValue = if (!is_volatile and self.liveness.isUnused(inst)) .dead else switch (arch) {
+                else => return self.fail("TODO implement ptr_elem_val for {}", .{self.target.cpu.arch}),
+            };
+            return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
+        }
+
+        fn airPtrElemPtr(self: *Self, inst: Air.Inst.Index) !void {
+            const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
+            const extra = self.air.extraData(Air.Bin, ty_pl.payload).data;
+            const result: MCValue = if (self.liveness.isUnused(inst)) .dead else switch (arch) {
+                else => return self.fail("TODO implement ptr_elem_ptr for {}", .{self.target.cpu.arch}),
+            };
+            return self.finishAir(inst, result, .{ extra.lhs, extra.rhs, .none });
+        }
+
+        fn airPtrPtrElemVal(self: *Self, inst: Air.Inst.Index) !void {
+            const is_volatile = false; // TODO
+            const bin_op = self.air.instructions.items(.data)[inst].bin_op;
+            const result: MCValue = if (!is_volatile and self.liveness.isUnused(inst)) .dead else switch (arch) {
+                else => return self.fail("TODO implement ptr_ptr_elem_val for {}", .{self.target.cpu.arch}),
             };
             return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
         }
@@ -1401,7 +1498,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             return true;
         }
 
-        fn load(self: *Self, dst_mcv: MCValue, ptr: MCValue, ptr_ty: Type) !void {
+        fn load(self: *Self, dst_mcv: MCValue, ptr: MCValue, ptr_ty: Type) InnerError!void {
             const elem_ty = ptr_ty.elemType();
             switch (ptr) {
                 .none => unreachable,
@@ -1418,11 +1515,25 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 .embedded_in_code => {
                     return self.fail("TODO implement loading from MCValue.embedded_in_code", .{});
                 },
-                .register => {
-                    return self.fail("TODO implement loading from MCValue.register", .{});
+                .register => |reg| {
+                    switch (arch) {
+                        .arm, .armeb => switch (dst_mcv) {
+                            .dead => unreachable,
+                            .undef => unreachable,
+                            .compare_flags_signed, .compare_flags_unsigned => unreachable,
+                            .embedded_in_code => unreachable,
+                            .register => |dst_reg| {
+                                writeInt(u32, try self.code.addManyAsArray(4), Instruction.ldr(.al, dst_reg, reg, .{ .offset = Instruction.Offset.none }).toU32());
+                            },
+                            else => return self.fail("TODO load from register into {}", .{dst_mcv}),
+                        },
+                        else => return self.fail("TODO implement loading from MCValue.register for {}", .{arch}),
+                    }
                 },
-                .memory => {
-                    return self.fail("TODO implement loading from MCValue.memory", .{});
+                .memory => |addr| {
+                    const reg = try self.register_manager.allocReg(null, &.{});
+                    try self.genSetReg(ptr_ty, reg, .{ .memory = addr });
+                    try self.load(dst_mcv, .{ .register = reg }, ptr_ty);
                 },
                 .stack_offset => {
                     return self.fail("TODO implement loading from MCValue.stack_offset", .{});
@@ -1496,8 +1607,27 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         fn airStructFieldPtr(self: *Self, inst: Air.Inst.Index) !void {
             const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
             const extra = self.air.extraData(Air.StructField, ty_pl.payload).data;
-            _ = extra;
+            return self.structFieldPtr(extra.struct_operand, ty_pl.ty, extra.field_index);
+        }
+
+        fn airStructFieldPtrIndex(self: *Self, inst: Air.Inst.Index, index: u8) !void {
+            const ty_op = self.air.instructions.items(.data)[inst].ty_op;
+            return self.structFieldPtr(ty_op.operand, ty_op.ty, index);
+        }
+        fn structFieldPtr(self: *Self, operand: Air.Inst.Ref, ty: Air.Inst.Ref, index: u32) !void {
+            _ = self;
+            _ = operand;
+            _ = ty;
+            _ = index;
             return self.fail("TODO implement codegen struct_field_ptr", .{});
+            //return self.finishAir(inst, result, .{ extra.struct_ptr, .none, .none });
+        }
+
+        fn airStructFieldVal(self: *Self, inst: Air.Inst.Index) !void {
+            const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
+            const extra = self.air.extraData(Air.StructField, ty_pl.payload).data;
+            _ = extra;
+            return self.fail("TODO implement codegen struct_field_val", .{});
             //return self.finishAir(inst, result, .{ extra.struct_ptr, .none, .none });
         }
 
@@ -1526,15 +1656,53 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
         }
 
         fn genArmBinOp(self: *Self, inst: Air.Inst.Index, op_lhs: Air.Inst.Ref, op_rhs: Air.Inst.Ref, op: Air.Inst.Tag) !MCValue {
+            // In the case of bitshifts, the type of rhs is different
+            // from the resulting type
+            const ty = self.air.typeOf(op_lhs);
+
+            switch (ty.zigTypeTag()) {
+                .Float => return self.fail("TODO ARM binary operations on floats", .{}),
+                .Vector => return self.fail("TODO ARM binary operations on vectors", .{}),
+                .Bool => {
+                    return self.genArmBinIntOp(inst, op_lhs, op_rhs, op, 1, .unsigned);
+                },
+                .Int => {
+                    const int_info = ty.intInfo(self.target.*);
+                    return self.genArmBinIntOp(inst, op_lhs, op_rhs, op, int_info.bits, int_info.signedness);
+                },
+                else => unreachable,
+            }
+        }
+
+        fn genArmBinIntOp(
+            self: *Self,
+            inst: Air.Inst.Index,
+            op_lhs: Air.Inst.Ref,
+            op_rhs: Air.Inst.Ref,
+            op: Air.Inst.Tag,
+            bits: u16,
+            signedness: std.builtin.Signedness,
+        ) !MCValue {
+            if (bits > 32) {
+                return self.fail("TODO ARM binary operations on integers > u32/i32", .{});
+            }
+
             const lhs = try self.resolveInst(op_lhs);
             const rhs = try self.resolveInst(op_rhs);
 
             const lhs_is_register = lhs == .register;
             const rhs_is_register = rhs == .register;
-            const lhs_should_be_register = try self.armOperandShouldBeRegister(lhs);
+            const lhs_should_be_register = switch (op) {
+                .shr, .shl => true,
+                else => try self.armOperandShouldBeRegister(lhs),
+            };
             const rhs_should_be_register = try self.armOperandShouldBeRegister(rhs);
             const reuse_lhs = lhs_is_register and self.reuseOperand(inst, op_lhs, 0, lhs);
             const reuse_rhs = !reuse_lhs and rhs_is_register and self.reuseOperand(inst, op_rhs, 1, rhs);
+            const can_swap_lhs_and_rhs = switch (op) {
+                .shr, .shl => false,
+                else => true,
+            };
 
             // Destination must be a register
             var dst_mcv: MCValue = undefined;
@@ -1551,7 +1719,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     branch.inst_table.putAssumeCapacity(Air.refToIndex(op_rhs).?, rhs_mcv);
                 }
                 dst_mcv = lhs;
-            } else if (reuse_rhs) {
+            } else if (reuse_rhs and can_swap_lhs_and_rhs) {
                 // Allocate 0 or 1 registers
                 if (!lhs_is_register and lhs_should_be_register) {
                     lhs_mcv = MCValue{ .register = try self.register_manager.allocReg(Air.refToIndex(op_lhs).?, &.{rhs.register}) };
@@ -1590,7 +1758,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         dst_mcv = MCValue{ .register = try self.register_manager.allocReg(inst, &.{}) };
                         lhs_mcv = dst_mcv;
                     }
-                } else if (rhs_should_be_register) {
+                } else if (rhs_should_be_register and can_swap_lhs_and_rhs) {
                     // LHS is immediate
                     if (rhs_is_register) {
                         dst_mcv = MCValue{ .register = try self.register_manager.allocReg(inst, &.{rhs.register}) };
@@ -1617,6 +1785,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 rhs_mcv,
                 swap_lhs_and_rhs,
                 op,
+                signedness,
             );
             return dst_mcv;
         }
@@ -1628,6 +1797,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             rhs_mcv: MCValue,
             swap_lhs_and_rhs: bool,
             op: Air.Inst.Tag,
+            signedness: std.builtin.Signedness,
         ) !void {
             assert(lhs_mcv == .register or rhs_mcv == .register);
 
@@ -1672,6 +1842,27 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                 },
                 .cmp_eq => {
                     writeInt(u32, try self.code.addManyAsArray(4), Instruction.cmp(.al, op1, operand).toU32());
+                },
+                .shl => {
+                    assert(!swap_lhs_and_rhs);
+                    const shift_amout = switch (operand) {
+                        .Register => |reg_op| Instruction.ShiftAmount.reg(@intToEnum(Register, reg_op.rm)),
+                        .Immediate => |imm_op| Instruction.ShiftAmount.imm(@intCast(u5, imm_op.imm)),
+                    };
+                    writeInt(u32, try self.code.addManyAsArray(4), Instruction.lsl(.al, dst_reg, op1, shift_amout).toU32());
+                },
+                .shr => {
+                    assert(!swap_lhs_and_rhs);
+                    const shift_amout = switch (operand) {
+                        .Register => |reg_op| Instruction.ShiftAmount.reg(@intToEnum(Register, reg_op.rm)),
+                        .Immediate => |imm_op| Instruction.ShiftAmount.imm(@intCast(u5, imm_op.imm)),
+                    };
+
+                    const shr = switch (signedness) {
+                        .signed => Instruction.asr,
+                        .unsigned => Instruction.lsr,
+                    };
+                    writeInt(u32, try self.code.addManyAsArray(4), shr(.al, dst_reg, op1, shift_amout).toU32());
                 },
                 else => unreachable, // not a binary instruction
             }
@@ -2247,13 +2438,13 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         .dwarf => |dbg_out| {
                             try dbg_out.dbg_info.ensureCapacity(dbg_out.dbg_info.items.len + 3);
                             dbg_out.dbg_info.appendAssumeCapacity(link.File.Elf.abbrev_parameter);
-                            dbg_out.dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT_location, DW.FORM_exprloc
+                            dbg_out.dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
                                 1, // ULEB128 dwarf expression length
                                 reg.dwarfLocOp(),
                             });
                             try dbg_out.dbg_info.ensureCapacity(dbg_out.dbg_info.items.len + 5 + name_with_null.len);
-                            try self.addDbgInfoTypeReloc(ty); // DW.AT_type,  DW.FORM_ref4
-                            dbg_out.dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT_name, DW.FORM_string
+                            try self.addDbgInfoTypeReloc(ty); // DW.AT.type,  DW.FORM.ref4
+                            dbg_out.dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
                         },
                         .none => {},
                     }
@@ -2276,15 +2467,15 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                     var counting_writer = std.io.countingWriter(std.io.null_writer);
                                     leb128.writeILEB128(counting_writer.writer(), adjusted_stack_offset) catch unreachable;
 
-                                    // DW.AT_location, DW.FORM_exprloc
+                                    // DW.AT.location, DW.FORM.exprloc
                                     // ULEB128 dwarf expression length
                                     try leb128.writeULEB128(dbg_out.dbg_info.writer(), counting_writer.bytes_written + 1);
-                                    try dbg_out.dbg_info.append(DW.OP_breg11);
+                                    try dbg_out.dbg_info.append(DW.OP.breg11);
                                     try leb128.writeILEB128(dbg_out.dbg_info.writer(), adjusted_stack_offset);
 
                                     try dbg_out.dbg_info.ensureCapacity(dbg_out.dbg_info.items.len + 5 + name_with_null.len);
-                                    try self.addDbgInfoTypeReloc(ty); // DW.AT_type,  DW.FORM_ref4
-                                    dbg_out.dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT_name, DW.FORM_string
+                                    try self.addDbgInfoTypeReloc(ty); // DW.AT.type,  DW.FORM.ref4
+                                    dbg_out.dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
                                 },
                                 else => {},
                             }
@@ -2670,7 +2861,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         // Add relocation to the decl.
                         try macho_file.active_decl.?.link.macho.relocs.append(self.bin_file.allocator, .{
                             .offset = offset,
-                            .where = .import,
+                            .where = .undef,
                             .where_index = where_index,
                             .payload = .{ .branch = .{
                                 .arch = arch,
@@ -2816,38 +3007,6 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             return bt.finishAir(result);
         }
 
-        fn airRef(self: *Self, inst: Air.Inst.Index) !void {
-            const ty_op = self.air.instructions.items(.data)[inst].ty_op;
-            const result: MCValue = if (self.liveness.isUnused(inst)) .dead else result: {
-                const operand_ty = self.air.typeOf(ty_op.operand);
-                const operand = try self.resolveInst(ty_op.operand);
-                switch (operand) {
-                    .unreach => unreachable,
-                    .dead => unreachable,
-                    .none => break :result MCValue{ .none = {} },
-
-                    .immediate,
-                    .register,
-                    .ptr_stack_offset,
-                    .ptr_embedded_in_code,
-                    .compare_flags_unsigned,
-                    .compare_flags_signed,
-                    => {
-                        const stack_offset = try self.allocMemPtr(inst);
-                        try self.genSetStack(operand_ty, stack_offset, operand);
-                        break :result MCValue{ .ptr_stack_offset = stack_offset };
-                    },
-
-                    .stack_offset => |offset| break :result MCValue{ .ptr_stack_offset = offset },
-                    .embedded_in_code => |offset| break :result MCValue{ .ptr_embedded_in_code = offset },
-                    .memory => |vaddr| break :result MCValue{ .immediate = vaddr },
-
-                    .undef => return self.fail("TODO implement ref on an undefined value", .{}),
-                }
-            };
-            return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
-        }
-
         fn ret(self: *Self, mcv: MCValue) !void {
             const ret_ty = self.fn_type.fnReturnType();
             try self.setRegOrMem(ret_ty, self.ret_mcv, mcv);
@@ -2913,10 +3072,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     const src_mcv = try self.limitImmediateType(bin_op.rhs, i32);
 
                     try self.genX8664BinMathCode(Type.initTag(.bool), dst_mcv, src_mcv, 7, 0x38);
-                    const info = ty.intInfo(self.target.*);
-                    break :result switch (info.signedness) {
-                        .signed => MCValue{ .compare_flags_signed = op },
-                        .unsigned => MCValue{ .compare_flags_unsigned = op },
+                    break :result switch (ty.isSignedInt()) {
+                        true => MCValue{ .compare_flags_signed = op },
+                        false => MCValue{ .compare_flags_unsigned = op },
                     };
                 },
                 .arm, .armeb => result: {
@@ -2956,12 +3114,12 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     }
 
                     // The destination register is not present in the cmp instruction
-                    try self.genArmBinOpCode(undefined, lhs_mcv, rhs_mcv, false, .cmp_eq);
+                    // The signedness of the integer does not matter for the cmp instruction
+                    try self.genArmBinOpCode(undefined, lhs_mcv, rhs_mcv, false, .cmp_eq, undefined);
 
-                    const info = ty.intInfo(self.target.*);
-                    break :result switch (info.signedness) {
-                        .signed => MCValue{ .compare_flags_signed = op },
-                        .unsigned => MCValue{ .compare_flags_unsigned = op },
+                    break :result switch (ty.isSignedInt()) {
+                        true => MCValue{ .compare_flags_signed = op },
+                        false => MCValue{ .compare_flags_unsigned = op },
                     };
                 },
                 else => return self.fail("TODO implement cmp for {}", .{self.target.cpu.arch}),
@@ -3668,7 +3826,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     }
 
                     {
-                        var iter = std.mem.tokenize(asm_source, "\n\r");
+                        var iter = std.mem.tokenize(u8, asm_source, "\n\r");
                         while (iter.next()) |ins| {
                             if (mem.eql(u8, ins, "syscall")) {
                                 try self.code.appendSlice(&[_]u8{ 0x0f, 0x05 });
@@ -3780,15 +3938,10 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             else => return self.fail("TODO implement memset", .{}),
                         }
                     },
-                    .compare_flags_unsigned => |op| {
-                        _ = op;
-                        return self.fail("TODO implement set stack variable with compare flags value (unsigned)", .{});
-                    },
-                    .compare_flags_signed => |op| {
-                        _ = op;
-                        return self.fail("TODO implement set stack variable with compare flags value (signed)", .{});
-                    },
-                    .immediate => {
+                    .compare_flags_unsigned,
+                    .compare_flags_signed,
+                    .immediate,
+                    => {
                         const reg = try self.copyToTmpRegister(ty, mcv);
                         return self.genSetStack(ty, stack_offset, MCValue{ .register = reg });
                     },
@@ -3956,15 +4109,10 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             else => return self.fail("TODO implement memset", .{}),
                         }
                     },
-                    .compare_flags_unsigned => |op| {
-                        _ = op;
-                        return self.fail("TODO implement set stack variable with compare flags value (unsigned)", .{});
-                    },
-                    .compare_flags_signed => |op| {
-                        _ = op;
-                        return self.fail("TODO implement set stack variable with compare flags value (signed)", .{});
-                    },
-                    .immediate => {
+                    .compare_flags_unsigned,
+                    .compare_flags_signed,
+                    .immediate,
+                    => {
                         const reg = try self.copyToTmpRegister(ty, mcv);
                         return self.genSetStack(ty, stack_offset, MCValue{ .register = reg });
                     },
@@ -4704,13 +4852,13 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                     },
                     else => {
                         if (typed_value.val.castTag(.decl_ref)) |payload| {
+                            const decl = payload.data;
+                            decl.alive = true;
                             if (self.bin_file.cast(link.File.Elf)) |elf_file| {
-                                const decl = payload.data;
                                 const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
                                 const got_addr = got.p_vaddr + decl.link.elf.offset_table_index * ptr_bytes;
                                 return MCValue{ .memory = got_addr };
                             } else if (self.bin_file.cast(link.File.MachO)) |macho_file| {
-                                const decl = payload.data;
                                 const got_addr = blk: {
                                     const seg = macho_file.load_commands.items[macho_file.data_const_segment_cmd_index.?].Segment;
                                     const got = seg.sections.items[macho_file.got_section_index.?];
@@ -4722,11 +4870,9 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                                 };
                                 return MCValue{ .memory = got_addr };
                             } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
-                                const decl = payload.data;
                                 const got_addr = coff_file.offset_table_virtual_address + decl.link.coff.offset_table_index * ptr_bytes;
                                 return MCValue{ .memory = got_addr };
                             } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
-                                const decl = payload.data;
                                 const got_addr = p9.bases.data + decl.link.plan9.got_index.? * ptr_bytes;
                                 return MCValue{ .memory = got_addr };
                             } else {
@@ -4765,6 +4911,56 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                         return MCValue{ .immediate = @boolToInt(typed_value.val.isNull()) };
                     }
                     return self.fail("TODO non pointer optionals", .{});
+                },
+                .Enum => {
+                    if (typed_value.val.castTag(.enum_field_index)) |field_index| {
+                        switch (typed_value.ty.tag()) {
+                            .enum_simple => {
+                                return MCValue{ .immediate = field_index.data };
+                            },
+                            .enum_full, .enum_nonexhaustive => {
+                                const enum_full = typed_value.ty.cast(Type.Payload.EnumFull).?.data;
+                                if (enum_full.values.count() != 0) {
+                                    const tag_val = enum_full.values.keys()[field_index.data];
+                                    return self.genTypedValue(.{ .ty = enum_full.tag_ty, .val = tag_val });
+                                } else {
+                                    return MCValue{ .immediate = field_index.data };
+                                }
+                            },
+                            else => unreachable,
+                        }
+                    } else {
+                        var int_tag_buffer: Type.Payload.Bits = undefined;
+                        const int_tag_ty = typed_value.ty.intTagType(&int_tag_buffer);
+                        return self.genTypedValue(.{ .ty = int_tag_ty, .val = typed_value.val });
+                    }
+                },
+                .ErrorSet => {
+                    switch (typed_value.val.tag()) {
+                        .@"error" => {
+                            const err_name = typed_value.val.castTag(.@"error").?.data.name;
+                            const module = self.bin_file.options.module.?;
+                            const global_error_set = module.global_error_set;
+                            const error_index = global_error_set.get(err_name).?;
+                            return MCValue{ .immediate = error_index };
+                        },
+                        else => {
+                            // In this case we are rendering an error union which has a 0 bits payload.
+                            return MCValue{ .immediate = 0 };
+                        },
+                    }
+                },
+                .ErrorUnion => {
+                    const error_type = typed_value.ty.errorUnionSet();
+                    const payload_type = typed_value.ty.errorUnionPayload();
+                    const sub_val = typed_value.val.castTag(.eu_payload).?.data;
+
+                    if (!payload_type.hasCodeGenBits()) {
+                        // We use the error type directly as the type.
+                        return self.genTypedValue(.{ .ty = error_type, .val = sub_val });
+                    }
+
+                    return self.fail("TODO implement error union const of type '{}'", .{typed_value.ty});
                 },
                 else => return self.fail("TODO implement const of type '{}'", .{typed_value.ty}),
             }
@@ -4894,7 +5090,7 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
                             }
 
                             result.stack_byte_count = nsaa;
-                            result.stack_align = 4;
+                            result.stack_align = 8;
                         },
                         else => return self.fail("TODO implement function parameters for {} on arm", .{cc}),
                     }
@@ -5023,23 +5219,57 @@ fn Function(comptime arch: std.Target.Cpu.Arch) type {
             return error.CodegenFail;
         }
 
-        usingnamespace switch (arch) {
-            .i386 => @import("codegen/x86.zig"),
-            .x86_64 => @import("codegen/x86_64.zig"),
-            .riscv64 => @import("codegen/riscv64.zig"),
-            .arm, .armeb => @import("codegen/arm.zig"),
-            .aarch64, .aarch64_be, .aarch64_32 => @import("codegen/aarch64.zig"),
-            else => struct {
-                pub const Register = enum {
-                    dummy,
+        const Register = switch (arch) {
+            .i386 => @import("codegen/x86.zig").Register,
+            .x86_64 => @import("codegen/x86_64.zig").Register,
+            .riscv64 => @import("codegen/riscv64.zig").Register,
+            .arm, .armeb => @import("codegen/arm.zig").Register,
+            .aarch64, .aarch64_be, .aarch64_32 => @import("codegen/aarch64.zig").Register,
+            else => enum {
+                dummy,
 
-                    pub fn allocIndex(self: Register) ?u4 {
-                        _ = self;
-                        return null;
-                    }
-                };
-                pub const callee_preserved_regs = [_]Register{};
+                pub fn allocIndex(self: Register) ?u4 {
+                    _ = self;
+                    return null;
+                }
             },
+        };
+
+        const Instruction = switch (arch) {
+            .riscv64 => @import("codegen/riscv64.zig").Instruction,
+            .arm, .armeb => @import("codegen/arm.zig").Instruction,
+            .aarch64, .aarch64_be, .aarch64_32 => @import("codegen/aarch64.zig").Instruction,
+            else => void,
+        };
+
+        const Condition = switch (arch) {
+            .arm, .armeb => @import("codegen/arm.zig").Condition,
+            else => void,
+        };
+
+        const callee_preserved_regs = switch (arch) {
+            .i386 => @import("codegen/x86.zig").callee_preserved_regs,
+            .x86_64 => @import("codegen/x86_64.zig").callee_preserved_regs,
+            .riscv64 => @import("codegen/riscv64.zig").callee_preserved_regs,
+            .arm, .armeb => @import("codegen/arm.zig").callee_preserved_regs,
+            .aarch64, .aarch64_be, .aarch64_32 => @import("codegen/aarch64.zig").callee_preserved_regs,
+            else => [_]Register{},
+        };
+
+        const c_abi_int_param_regs = switch (arch) {
+            .i386 => @import("codegen/x86.zig").c_abi_int_param_regs,
+            .x86_64 => @import("codegen/x86_64.zig").c_abi_int_param_regs,
+            .arm, .armeb => @import("codegen/arm.zig").c_abi_int_param_regs,
+            .aarch64, .aarch64_be, .aarch64_32 => @import("codegen/aarch64.zig").c_abi_int_param_regs,
+            else => [_]Register{},
+        };
+
+        const c_abi_int_return_regs = switch (arch) {
+            .i386 => @import("codegen/x86.zig").c_abi_int_return_regs,
+            .x86_64 => @import("codegen/x86_64.zig").c_abi_int_return_regs,
+            .arm, .armeb => @import("codegen/arm.zig").c_abi_int_return_regs,
+            .aarch64, .aarch64_be, .aarch64_32 => @import("codegen/aarch64.zig").c_abi_int_return_regs,
+            else => [_]Register{},
         };
 
         fn parseRegName(name: []const u8) ?Register {

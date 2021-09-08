@@ -582,7 +582,9 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
 
         bool want_ssp_attrs = g->build_mode != BuildModeFastRelease &&
                               g->build_mode != BuildModeSmallRelease &&
-                              g->link_libc;
+                              g->link_libc &&
+                              // WASI-libc does not support stack-protector yet.
+                              !target_is_wasm(g->zig_target);
         if (want_ssp_attrs) {
             addLLVMFnAttr(llvm_fn, "sspstrong");
             addLLVMFnAttrStr(llvm_fn, "stack-protector-buffer-size", "4");
@@ -3248,6 +3250,70 @@ static LLVMValueRef ir_render_bin_op(CodeGen *g, Stage1Air *executable,
         case IrBinOpRemMod:
             return gen_rem(g, want_runtime_safety, ir_want_fast_math(g, &bin_op_instruction->base),
                     op1_value, op2_value, operand_type, RemKindMod);
+        case IrBinOpMaximum:
+            if (scalar_type->id == ZigTypeIdFloat) {
+                return ZigLLVMBuildMaxNum(g->builder, op1_value, op2_value, "");
+            } else if (scalar_type->id == ZigTypeIdInt) {
+                if (scalar_type->data.integral.is_signed) {
+                    return ZigLLVMBuildSMax(g->builder, op1_value, op2_value, "");
+                } else {
+                    return ZigLLVMBuildUMax(g->builder, op1_value, op2_value, "");
+                }
+            } else {
+                zig_unreachable();
+            }
+        case IrBinOpMinimum:
+            if (scalar_type->id == ZigTypeIdFloat) {
+                return ZigLLVMBuildMinNum(g->builder, op1_value, op2_value, "");
+            } else if (scalar_type->id == ZigTypeIdInt) {
+                if (scalar_type->data.integral.is_signed) {
+                    return ZigLLVMBuildSMin(g->builder, op1_value, op2_value, "");
+                } else {
+                    return ZigLLVMBuildUMin(g->builder, op1_value, op2_value, "");
+                }
+            } else {
+                zig_unreachable();
+            }
+        case IrBinOpSatAdd:
+            if (scalar_type->id == ZigTypeIdInt) {
+                if (scalar_type->data.integral.is_signed) {
+                    return ZigLLVMBuildSAddSat(g->builder, op1_value, op2_value, "");
+                } else {
+                    return ZigLLVMBuildUAddSat(g->builder, op1_value, op2_value, "");
+                }
+            } else {
+                zig_unreachable();
+            }
+        case IrBinOpSatSub:
+            if (scalar_type->id == ZigTypeIdInt) {
+                if (scalar_type->data.integral.is_signed) {
+                    return ZigLLVMBuildSSubSat(g->builder, op1_value, op2_value, "");
+                } else {
+                    return ZigLLVMBuildUSubSat(g->builder, op1_value, op2_value, "");
+                }
+            } else {
+                zig_unreachable();
+            }
+        case IrBinOpSatMul:
+            if (scalar_type->id == ZigTypeIdInt) {
+                if (scalar_type->data.integral.is_signed) {
+                    return ZigLLVMBuildSMulFixSat(g->builder, op1_value, op2_value, "");
+                } else {
+                    return ZigLLVMBuildUMulFixSat(g->builder, op1_value, op2_value, "");
+                }
+            } else {
+                zig_unreachable();
+            }
+        case IrBinOpSatShl:
+            if (scalar_type->id == ZigTypeIdInt) {
+                if (scalar_type->data.integral.is_signed) {
+                    return ZigLLVMBuildSShlSat(g->builder, op1_value, op2_value, "");
+                } else {
+                    return ZigLLVMBuildUShlSat(g->builder, op1_value, op2_value, "");
+                }
+            } else {
+                zig_unreachable();
+            }
     }
     zig_unreachable();
 }
@@ -3744,10 +3810,14 @@ static LLVMValueRef ir_render_load_ptr(CodeGen *g, Stage1Air *executable,
     LLVMValueRef shift_amt_val = LLVMConstInt(LLVMTypeOf(containing_int), shift_amt, false);
     LLVMValueRef shifted_value = LLVMBuildLShr(g->builder, containing_int, shift_amt_val, "");
 
+    LLVMTypeRef same_size_int = LLVMIntType(size_in_bits);
+    LLVMValueRef mask = LLVMConstAllOnes(LLVMIntType(size_in_bits));
+    mask = LLVMConstZExt(mask, LLVMTypeOf(containing_int));
+    LLVMValueRef masked_value = LLVMBuildAnd(g->builder, shifted_value, mask, "");
+
     if (handle_is_ptr(g, child_type)) {
         LLVMValueRef result_loc = ir_llvm_value(g, instruction->result_loc);
-        LLVMTypeRef same_size_int = LLVMIntType(size_in_bits);
-        LLVMValueRef truncated_int = LLVMBuildTrunc(g->builder, shifted_value, same_size_int, "");
+        LLVMValueRef truncated_int = LLVMBuildTrunc(g->builder, masked_value, same_size_int, "");
         LLVMValueRef bitcasted_ptr = LLVMBuildBitCast(g->builder, result_loc,
                                                       LLVMPointerType(same_size_int, 0), "");
         LLVMBuildStore(g->builder, truncated_int, bitcasted_ptr);
@@ -3755,12 +3825,11 @@ static LLVMValueRef ir_render_load_ptr(CodeGen *g, Stage1Air *executable,
     }
 
     if (child_type->id == ZigTypeIdFloat) {
-        LLVMTypeRef same_size_int = LLVMIntType(size_in_bits);
-        LLVMValueRef truncated_int = LLVMBuildTrunc(g->builder, shifted_value, same_size_int, "");
+        LLVMValueRef truncated_int = LLVMBuildTrunc(g->builder, masked_value, same_size_int, "");
         return LLVMBuildBitCast(g->builder, truncated_int, get_llvm_type(g, child_type), "");
     }
 
-    return LLVMBuildTrunc(g->builder, shifted_value, get_llvm_type(g, child_type), "");
+    return LLVMBuildTrunc(g->builder, masked_value, get_llvm_type(g, child_type), "");
 }
 
 static bool value_is_all_undef_array(CodeGen *g, ZigValue *const_val, size_t len) {
@@ -5160,6 +5229,13 @@ static LLVMValueRef ir_render_shuffle_vector(CodeGen *g, Stage1Air *executable, 
         ir_llvm_value(g, instruction->a),
         ir_llvm_value(g, instruction->b),
         llvm_mask_value, "");
+}
+
+static LLVMValueRef ir_render_select(CodeGen *g, Stage1Air *executable, Stage1AirInstSelect *instruction) {
+    LLVMValueRef pred = ir_llvm_value(g, instruction->pred);
+    LLVMValueRef a = ir_llvm_value(g, instruction->a);
+    LLVMValueRef b = ir_llvm_value(g, instruction->b);
+    return LLVMBuildSelect(g->builder, pred, a, b, "");
 }
 
 static LLVMValueRef ir_render_splat(CodeGen *g, Stage1Air *executable, Stage1AirInstSplat *instruction) {
@@ -7015,6 +7091,8 @@ static LLVMValueRef ir_render_instruction(CodeGen *g, Stage1Air *executable, Sta
             return ir_render_spill_end(g, executable, (Stage1AirInstSpillEnd *)instruction);
         case Stage1AirInstIdShuffleVector:
             return ir_render_shuffle_vector(g, executable, (Stage1AirInstShuffleVector *) instruction);
+        case Stage1AirInstIdSelect:
+            return ir_render_select(g, executable, (Stage1AirInstSelect *) instruction);
         case Stage1AirInstIdSplat:
             return ir_render_splat(g, executable, (Stage1AirInstSplat *) instruction);
         case Stage1AirInstIdVectorExtractElem:
@@ -8761,6 +8839,9 @@ static void define_builtin_types(CodeGen *g) {
         case ZigLLVM_sparcv9:
             add_fp_entry(g, "c_longdouble", 128, LLVMFP128Type(), &g->builtin_types.entry_c_longdouble);
             break;
+        case ZigLLVM_systemz:
+            add_fp_entry(g, "c_longdouble", 128, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
+            break;
         case ZigLLVM_avr:
             // It's either a float or a double, depending on a toolchain switch
             add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
@@ -8920,6 +9001,7 @@ static void define_builtin_fns(CodeGen *g) {
     create_builtin_fn(g, BuiltinFnIdCompileLog, "compileLog", SIZE_MAX);
     create_builtin_fn(g, BuiltinFnIdVectorType, "Vector", 2);
     create_builtin_fn(g, BuiltinFnIdShuffle, "shuffle", 4);
+    create_builtin_fn(g, BuiltinFnIdSelect, "select", 4);
     create_builtin_fn(g, BuiltinFnIdSplat, "splat", 2);
     create_builtin_fn(g, BuiltinFnIdSetCold, "setCold", 1);
     create_builtin_fn(g, BuiltinFnIdSetRuntimeSafety, "setRuntimeSafety", 1);
@@ -8980,6 +9062,12 @@ static void define_builtin_fns(CodeGen *g) {
     create_builtin_fn(g, BuiltinFnIdWasmMemoryGrow, "wasmMemoryGrow", 2);
     create_builtin_fn(g, BuiltinFnIdSrc, "src", 0);
     create_builtin_fn(g, BuiltinFnIdReduce, "reduce", 2);
+    create_builtin_fn(g, BuiltinFnIdMaximum, "maximum", 2);
+    create_builtin_fn(g, BuiltinFnIdMinimum, "minimum", 2);
+    create_builtin_fn(g, BuiltinFnIdSatAdd, "addWithSaturation", 2);
+    create_builtin_fn(g, BuiltinFnIdSatSub, "subWithSaturation", 2);
+    create_builtin_fn(g, BuiltinFnIdSatMul, "mulWithSaturation", 2);
+    create_builtin_fn(g, BuiltinFnIdSatShl, "shlWithSaturation", 2);
 }
 
 static const char *bool_to_str(bool b) {

@@ -31,6 +31,21 @@ pub const Context = opaque {
     pub const intType = LLVMIntTypeInContext;
     extern fn LLVMIntTypeInContext(C: *const Context, NumBits: c_uint) *const Type;
 
+    pub const halfType = LLVMHalfTypeInContext;
+    extern fn LLVMHalfTypeInContext(C: *const Context) *const Type;
+
+    pub const floatType = LLVMFloatTypeInContext;
+    extern fn LLVMFloatTypeInContext(C: *const Context) *const Type;
+
+    pub const doubleType = LLVMDoubleTypeInContext;
+    extern fn LLVMDoubleTypeInContext(C: *const Context) *const Type;
+
+    pub const x86FP80Type = LLVMX86FP80TypeInContext;
+    extern fn LLVMX86FP80TypeInContext(C: *const Context) *const Type;
+
+    pub const fp128Type = LLVMFP128TypeInContext;
+    extern fn LLVMFP128TypeInContext(C: *const Context) *const Type;
+
     pub const voidType = LLVMVoidTypeInContext;
     extern fn LLVMVoidTypeInContext(C: *const Context) *const Type;
 
@@ -49,7 +64,12 @@ pub const Context = opaque {
     extern fn LLVMConstStringInContext(C: *const Context, Str: [*]const u8, Length: c_uint, DontNullTerminate: Bool) *const Value;
 
     pub const constStruct = LLVMConstStructInContext;
-    extern fn LLVMConstStructInContext(C: *const Context, ConstantVals: [*]*const Value, Count: c_uint, Packed: Bool) *const Value;
+    extern fn LLVMConstStructInContext(
+        C: *const Context,
+        ConstantVals: [*]const *const Value,
+        Count: c_uint,
+        Packed: Bool,
+    ) *const Value;
 
     pub const createBasicBlock = LLVMCreateBasicBlockInContext;
     extern fn LLVMCreateBasicBlockInContext(C: *const Context, Name: [*:0]const u8) *const BasicBlock;
@@ -82,6 +102,37 @@ pub const Value = opaque {
 
     pub const setGlobalConstant = LLVMSetGlobalConstant;
     extern fn LLVMSetGlobalConstant(GlobalVar: *const Value, IsConstant: Bool) void;
+
+    pub const setLinkage = LLVMSetLinkage;
+    extern fn LLVMSetLinkage(Global: *const Value, Linkage: Linkage) void;
+
+    pub const setUnnamedAddr = LLVMSetUnnamedAddr;
+    extern fn LLVMSetUnnamedAddr(Global: *const Value, HasUnnamedAddr: Bool) void;
+
+    pub const deleteGlobal = LLVMDeleteGlobal;
+    extern fn LLVMDeleteGlobal(GlobalVar: *const Value) void;
+
+    pub const getNextGlobalAlias = LLVMGetNextGlobalAlias;
+    extern fn LLVMGetNextGlobalAlias(GA: *const Value) *const Value;
+
+    pub const getAliasee = LLVMAliasGetAliasee;
+    extern fn LLVMAliasGetAliasee(Alias: *const Value) *const Value;
+
+    pub const setAliasee = LLVMAliasSetAliasee;
+    extern fn LLVMAliasSetAliasee(Alias: *const Value, Aliasee: *const Value) void;
+
+    pub const constInBoundsGEP = LLVMConstInBoundsGEP;
+    extern fn LLVMConstInBoundsGEP(
+        ConstantVal: *const Value,
+        ConstantIndices: [*]const *const Value,
+        NumIndices: c_uint,
+    ) *const Value;
+
+    pub const constBitCast = LLVMConstBitCast;
+    extern fn LLVMConstBitCast(ConstantVal: *const Value, ToType: *const Type) *const Value;
+
+    pub const constIntToPtr = LLVMConstIntToPtr;
+    extern fn LLVMConstIntToPtr(ConstantVal: *const Value, ToType: *const Type) *const Value;
 };
 
 pub const Type = opaque {
@@ -94,8 +145,11 @@ pub const Type = opaque {
     pub const constInt = LLVMConstInt;
     extern fn LLVMConstInt(IntTy: *const Type, N: c_ulonglong, SignExtend: Bool) *const Value;
 
+    pub const constReal = LLVMConstReal;
+    extern fn LLVMConstReal(RealTy: *const Type, N: f64) *const Value;
+
     pub const constArray = LLVMConstArray;
-    extern fn LLVMConstArray(ElementTy: *const Type, ConstantVals: ?[*]*const Value, Length: c_uint) *const Value;
+    extern fn LLVMConstArray(ElementTy: *const Type, ConstantVals: [*]*const Value, Length: c_uint) *const Value;
 
     pub const getUndef = LLVMGetUndef;
     extern fn LLVMGetUndef(Ty: *const Type) *const Value;
@@ -145,6 +199,30 @@ pub const Module = opaque {
 
     pub const dump = LLVMDumpModule;
     extern fn LLVMDumpModule(M: *const Module) void;
+
+    pub const getFirstGlobalAlias = LLVMGetFirstGlobalAlias;
+    extern fn LLVMGetFirstGlobalAlias(M: *const Module) *const Value;
+
+    pub const getLastGlobalAlias = LLVMGetLastGlobalAlias;
+    extern fn LLVMGetLastGlobalAlias(M: *const Module) *const Value;
+
+    pub const addAlias = LLVMAddAlias;
+    extern fn LLVMAddAlias(
+        M: *const Module,
+        Ty: *const Type,
+        Aliasee: *const Value,
+        Name: [*:0]const u8,
+    ) *const Value;
+
+    pub const getNamedGlobalAlias = LLVMGetNamedGlobalAlias;
+    extern fn LLVMGetNamedGlobalAlias(
+        M: *const Module,
+        /// Empirically, LLVM will call strlen() on `Name` and so it
+        /// must be both null terminated and also have `NameLen` set
+        /// to the size.
+        Name: [*:0]const u8,
+        NameLen: usize,
+    ) ?*const Value;
 };
 
 pub const lookupIntrinsicID = LLVMLookupIntrinsicID;
@@ -212,6 +290,14 @@ pub const Builder = opaque {
     pub const getInsertBlock = LLVMGetInsertBlock;
     extern fn LLVMGetInsertBlock(Builder: *const Builder) *const BasicBlock;
 
+    pub const buildZExt = LLVMBuildZExt;
+    extern fn LLVMBuildZExt(
+        *const Builder,
+        Value: *const Value,
+        DestTy: *const Type,
+        Name: [*:0]const u8,
+    ) *const Value;
+
     pub const buildCall = LLVMBuildCall;
     extern fn LLVMBuildCall(
         *const Builder,
@@ -249,8 +335,17 @@ pub const Builder = opaque {
     pub const buildLoad = LLVMBuildLoad;
     extern fn LLVMBuildLoad(*const Builder, PointerVal: *const Value, Name: [*:0]const u8) *const Value;
 
+    pub const buildNeg = LLVMBuildNeg;
+    extern fn LLVMBuildNeg(*const Builder, V: *const Value, Name: [*:0]const u8) *const Value;
+
     pub const buildNot = LLVMBuildNot;
     extern fn LLVMBuildNot(*const Builder, V: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildFAdd = LLVMBuildFAdd;
+    extern fn LLVMBuildFAdd(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildAdd = LLVMBuildAdd;
+    extern fn LLVMBuildAdd(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
 
     pub const buildNSWAdd = LLVMBuildNSWAdd;
     extern fn LLVMBuildNSWAdd(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
@@ -258,11 +353,65 @@ pub const Builder = opaque {
     pub const buildNUWAdd = LLVMBuildNUWAdd;
     extern fn LLVMBuildNUWAdd(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
 
+    pub const buildFSub = LLVMBuildFSub;
+    extern fn LLVMBuildFSub(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildSub = LLVMBuildSub;
+    extern fn LLVMBuildSub(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
     pub const buildNSWSub = LLVMBuildNSWSub;
     extern fn LLVMBuildNSWSub(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
 
     pub const buildNUWSub = LLVMBuildNUWSub;
     extern fn LLVMBuildNUWSub(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildFMul = LLVMBuildFMul;
+    extern fn LLVMBuildFMul(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildMul = LLVMBuildMul;
+    extern fn LLVMBuildMul(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildNSWMul = LLVMBuildNSWMul;
+    extern fn LLVMBuildNSWMul(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildNUWMul = LLVMBuildNUWMul;
+    extern fn LLVMBuildNUWMul(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildUDiv = LLVMBuildUDiv;
+    extern fn LLVMBuildUDiv(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildSDiv = LLVMBuildSDiv;
+    extern fn LLVMBuildSDiv(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildFDiv = LLVMBuildFDiv;
+    extern fn LLVMBuildFDiv(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildURem = LLVMBuildURem;
+    extern fn LLVMBuildURem(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildSRem = LLVMBuildSRem;
+    extern fn LLVMBuildSRem(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildFRem = LLVMBuildFRem;
+    extern fn LLVMBuildFRem(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildAnd = LLVMBuildAnd;
+    extern fn LLVMBuildAnd(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildLShr = LLVMBuildLShr;
+    extern fn LLVMBuildLShr(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildAShr = LLVMBuildAShr;
+    extern fn LLVMBuildAShr(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildShl = LLVMBuildShl;
+    extern fn LLVMBuildShl(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildOr = LLVMBuildOr;
+    extern fn LLVMBuildOr(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildXor = LLVMBuildXor;
+    extern fn LLVMBuildXor(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
 
     pub const buildIntCast2 = LLVMBuildIntCast2;
     extern fn LLVMBuildIntCast2(*const Builder, Val: *const Value, DestTy: *const Type, IsSigned: Bool, Name: [*:0]const u8) *const Value;
@@ -279,8 +428,21 @@ pub const Builder = opaque {
         Name: [*:0]const u8,
     ) *const Value;
 
+    pub const buildInBoundsGEP2 = LLVMBuildInBoundsGEP2;
+    extern fn LLVMBuildInBoundsGEP2(
+        B: *const Builder,
+        Ty: *const Type,
+        Pointer: *const Value,
+        Indices: [*]const *const Value,
+        NumIndices: c_uint,
+        Name: [*:0]const u8,
+    ) *const Value;
+
     pub const buildICmp = LLVMBuildICmp;
     extern fn LLVMBuildICmp(*const Builder, Op: IntPredicate, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildFCmp = LLVMBuildFCmp;
+    extern fn LLVMBuildFCmp(*const Builder, Op: RealPredicate, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
 
     pub const buildBr = LLVMBuildBr;
     extern fn LLVMBuildBr(*const Builder, Dest: *const BasicBlock) *const Value;
@@ -292,13 +454,39 @@ pub const Builder = opaque {
     extern fn LLVMBuildPhi(*const Builder, Ty: *const Type, Name: [*:0]const u8) *const Value;
 
     pub const buildExtractValue = LLVMBuildExtractValue;
-    extern fn LLVMBuildExtractValue(*const Builder, AggVal: *const Value, Index: c_uint, Name: [*:0]const u8) *const Value;
+    extern fn LLVMBuildExtractValue(
+        *const Builder,
+        AggVal: *const Value,
+        Index: c_uint,
+        Name: [*:0]const u8,
+    ) *const Value;
 
     pub const buildPtrToInt = LLVMBuildPtrToInt;
-    extern fn LLVMBuildPtrToInt(*const Builder, Val: *const Value, DestTy: *const Type, Name: [*:0]const u8) *const Value;
+    extern fn LLVMBuildPtrToInt(
+        *const Builder,
+        Val: *const Value,
+        DestTy: *const Type,
+        Name: [*:0]const u8,
+    ) *const Value;
+
+    pub const buildStructGEP = LLVMBuildStructGEP;
+    extern fn LLVMBuildStructGEP(
+        B: *const Builder,
+        Pointer: *const Value,
+        Idx: c_uint,
+        Name: [*:0]const u8,
+    ) *const Value;
+
+    pub const buildTrunc = LLVMBuildTrunc;
+    extern fn LLVMBuildTrunc(
+        *const Builder,
+        Val: *const Value,
+        DestTy: *const Type,
+        Name: [*:0]const u8,
+    ) *const Value;
 };
 
-pub const IntPredicate = enum(c_int) {
+pub const IntPredicate = enum(c_uint) {
     EQ = 32,
     NE = 33,
     UGT = 34,
@@ -309,6 +497,23 @@ pub const IntPredicate = enum(c_int) {
     SGE = 39,
     SLT = 40,
     SLE = 41,
+};
+
+pub const RealPredicate = enum(c_uint) {
+    OEQ = 1,
+    OGT = 2,
+    OGE = 3,
+    OLT = 4,
+    OLE = 5,
+    ONE = 6,
+    ORD = 7,
+    UNO = 8,
+    UEQ = 9,
+    UGT = 10,
+    UGE = 11,
+    ULT = 12,
+    ULE = 13,
+    UNE = 14,
 };
 
 pub const BasicBlock = opaque {
@@ -400,188 +605,93 @@ pub const Target = opaque {
     extern fn LLVMGetTargetFromTriple(Triple: [*:0]const u8, T: **const Target, ErrorMessage: *[*:0]const u8) Bool;
 };
 
-extern fn LLVMInitializeAArch64TargetInfo() void;
-extern fn LLVMInitializeAMDGPUTargetInfo() void;
-extern fn LLVMInitializeARMTargetInfo() void;
-extern fn LLVMInitializeAVRTargetInfo() void;
-extern fn LLVMInitializeBPFTargetInfo() void;
-extern fn LLVMInitializeHexagonTargetInfo() void;
-extern fn LLVMInitializeLanaiTargetInfo() void;
-extern fn LLVMInitializeMipsTargetInfo() void;
-extern fn LLVMInitializeMSP430TargetInfo() void;
-extern fn LLVMInitializeNVPTXTargetInfo() void;
-extern fn LLVMInitializePowerPCTargetInfo() void;
-extern fn LLVMInitializeRISCVTargetInfo() void;
-extern fn LLVMInitializeSparcTargetInfo() void;
-extern fn LLVMInitializeSystemZTargetInfo() void;
-extern fn LLVMInitializeWebAssemblyTargetInfo() void;
-extern fn LLVMInitializeX86TargetInfo() void;
-extern fn LLVMInitializeXCoreTargetInfo() void;
-extern fn LLVMInitializeAArch64Target() void;
-extern fn LLVMInitializeAMDGPUTarget() void;
-extern fn LLVMInitializeARMTarget() void;
-extern fn LLVMInitializeAVRTarget() void;
-extern fn LLVMInitializeBPFTarget() void;
-extern fn LLVMInitializeHexagonTarget() void;
-extern fn LLVMInitializeLanaiTarget() void;
-extern fn LLVMInitializeMipsTarget() void;
-extern fn LLVMInitializeMSP430Target() void;
-extern fn LLVMInitializeNVPTXTarget() void;
-extern fn LLVMInitializePowerPCTarget() void;
-extern fn LLVMInitializeRISCVTarget() void;
-extern fn LLVMInitializeSparcTarget() void;
-extern fn LLVMInitializeSystemZTarget() void;
-extern fn LLVMInitializeWebAssemblyTarget() void;
-extern fn LLVMInitializeX86Target() void;
-extern fn LLVMInitializeXCoreTarget() void;
-extern fn LLVMInitializeAArch64TargetMC() void;
-extern fn LLVMInitializeAMDGPUTargetMC() void;
-extern fn LLVMInitializeARMTargetMC() void;
-extern fn LLVMInitializeAVRTargetMC() void;
-extern fn LLVMInitializeBPFTargetMC() void;
-extern fn LLVMInitializeHexagonTargetMC() void;
-extern fn LLVMInitializeLanaiTargetMC() void;
-extern fn LLVMInitializeMipsTargetMC() void;
-extern fn LLVMInitializeMSP430TargetMC() void;
-extern fn LLVMInitializeNVPTXTargetMC() void;
-extern fn LLVMInitializePowerPCTargetMC() void;
-extern fn LLVMInitializeRISCVTargetMC() void;
-extern fn LLVMInitializeSparcTargetMC() void;
-extern fn LLVMInitializeSystemZTargetMC() void;
-extern fn LLVMInitializeWebAssemblyTargetMC() void;
-extern fn LLVMInitializeX86TargetMC() void;
-extern fn LLVMInitializeXCoreTargetMC() void;
-extern fn LLVMInitializeAArch64AsmPrinter() void;
-extern fn LLVMInitializeAMDGPUAsmPrinter() void;
-extern fn LLVMInitializeARMAsmPrinter() void;
-extern fn LLVMInitializeAVRAsmPrinter() void;
-extern fn LLVMInitializeBPFAsmPrinter() void;
-extern fn LLVMInitializeHexagonAsmPrinter() void;
-extern fn LLVMInitializeLanaiAsmPrinter() void;
-extern fn LLVMInitializeMipsAsmPrinter() void;
-extern fn LLVMInitializeMSP430AsmPrinter() void;
-extern fn LLVMInitializeNVPTXAsmPrinter() void;
-extern fn LLVMInitializePowerPCAsmPrinter() void;
-extern fn LLVMInitializeRISCVAsmPrinter() void;
-extern fn LLVMInitializeSparcAsmPrinter() void;
-extern fn LLVMInitializeSystemZAsmPrinter() void;
-extern fn LLVMInitializeWebAssemblyAsmPrinter() void;
-extern fn LLVMInitializeX86AsmPrinter() void;
-extern fn LLVMInitializeXCoreAsmPrinter() void;
-extern fn LLVMInitializeAArch64AsmParser() void;
-extern fn LLVMInitializeAMDGPUAsmParser() void;
-extern fn LLVMInitializeARMAsmParser() void;
-extern fn LLVMInitializeAVRAsmParser() void;
-extern fn LLVMInitializeBPFAsmParser() void;
-extern fn LLVMInitializeHexagonAsmParser() void;
-extern fn LLVMInitializeLanaiAsmParser() void;
-extern fn LLVMInitializeMipsAsmParser() void;
-extern fn LLVMInitializeMSP430AsmParser() void;
-extern fn LLVMInitializePowerPCAsmParser() void;
-extern fn LLVMInitializeRISCVAsmParser() void;
-extern fn LLVMInitializeSparcAsmParser() void;
-extern fn LLVMInitializeSystemZAsmParser() void;
-extern fn LLVMInitializeWebAssemblyAsmParser() void;
-extern fn LLVMInitializeX86AsmParser() void;
+pub extern fn LLVMInitializeAArch64TargetInfo() void;
+pub extern fn LLVMInitializeAMDGPUTargetInfo() void;
+pub extern fn LLVMInitializeARMTargetInfo() void;
+pub extern fn LLVMInitializeAVRTargetInfo() void;
+pub extern fn LLVMInitializeBPFTargetInfo() void;
+pub extern fn LLVMInitializeHexagonTargetInfo() void;
+pub extern fn LLVMInitializeLanaiTargetInfo() void;
+pub extern fn LLVMInitializeMipsTargetInfo() void;
+pub extern fn LLVMInitializeMSP430TargetInfo() void;
+pub extern fn LLVMInitializeNVPTXTargetInfo() void;
+pub extern fn LLVMInitializePowerPCTargetInfo() void;
+pub extern fn LLVMInitializeRISCVTargetInfo() void;
+pub extern fn LLVMInitializeSparcTargetInfo() void;
+pub extern fn LLVMInitializeSystemZTargetInfo() void;
+pub extern fn LLVMInitializeWebAssemblyTargetInfo() void;
+pub extern fn LLVMInitializeX86TargetInfo() void;
+pub extern fn LLVMInitializeXCoreTargetInfo() void;
 
-pub const initializeAllTargetInfos = LLVMInitializeAllTargetInfos;
-fn LLVMInitializeAllTargetInfos() callconv(.C) void {
-    LLVMInitializeAArch64TargetInfo();
-    LLVMInitializeAMDGPUTargetInfo();
-    LLVMInitializeARMTargetInfo();
-    LLVMInitializeAVRTargetInfo();
-    LLVMInitializeBPFTargetInfo();
-    LLVMInitializeHexagonTargetInfo();
-    LLVMInitializeLanaiTargetInfo();
-    LLVMInitializeMipsTargetInfo();
-    LLVMInitializeMSP430TargetInfo();
-    LLVMInitializeNVPTXTargetInfo();
-    LLVMInitializePowerPCTargetInfo();
-    LLVMInitializeRISCVTargetInfo();
-    LLVMInitializeSparcTargetInfo();
-    LLVMInitializeSystemZTargetInfo();
-    LLVMInitializeWebAssemblyTargetInfo();
-    LLVMInitializeX86TargetInfo();
-    LLVMInitializeXCoreTargetInfo();
-}
-pub const initializeAllTargets = LLVMInitializeAllTargets;
-fn LLVMInitializeAllTargets() callconv(.C) void {
-    LLVMInitializeAArch64Target();
-    LLVMInitializeAMDGPUTarget();
-    LLVMInitializeARMTarget();
-    LLVMInitializeAVRTarget();
-    LLVMInitializeBPFTarget();
-    LLVMInitializeHexagonTarget();
-    LLVMInitializeLanaiTarget();
-    LLVMInitializeMipsTarget();
-    LLVMInitializeMSP430Target();
-    LLVMInitializeNVPTXTarget();
-    LLVMInitializePowerPCTarget();
-    LLVMInitializeRISCVTarget();
-    LLVMInitializeSparcTarget();
-    LLVMInitializeSystemZTarget();
-    LLVMInitializeWebAssemblyTarget();
-    LLVMInitializeX86Target();
-    LLVMInitializeXCoreTarget();
-}
-pub const initializeAllTargetMCs = LLVMInitializeAllTargetMCs;
-fn LLVMInitializeAllTargetMCs() callconv(.C) void {
-    LLVMInitializeAArch64TargetMC();
-    LLVMInitializeAMDGPUTargetMC();
-    LLVMInitializeARMTargetMC();
-    LLVMInitializeAVRTargetMC();
-    LLVMInitializeBPFTargetMC();
-    LLVMInitializeHexagonTargetMC();
-    LLVMInitializeLanaiTargetMC();
-    LLVMInitializeMipsTargetMC();
-    LLVMInitializeMSP430TargetMC();
-    LLVMInitializeNVPTXTargetMC();
-    LLVMInitializePowerPCTargetMC();
-    LLVMInitializeRISCVTargetMC();
-    LLVMInitializeSparcTargetMC();
-    LLVMInitializeSystemZTargetMC();
-    LLVMInitializeWebAssemblyTargetMC();
-    LLVMInitializeX86TargetMC();
-    LLVMInitializeXCoreTargetMC();
-}
-pub const initializeAllAsmPrinters = LLVMInitializeAllAsmPrinters;
-fn LLVMInitializeAllAsmPrinters() callconv(.C) void {
-    LLVMInitializeAArch64AsmPrinter();
-    LLVMInitializeAMDGPUAsmPrinter();
-    LLVMInitializeARMAsmPrinter();
-    LLVMInitializeAVRAsmPrinter();
-    LLVMInitializeBPFAsmPrinter();
-    LLVMInitializeHexagonAsmPrinter();
-    LLVMInitializeLanaiAsmPrinter();
-    LLVMInitializeMipsAsmPrinter();
-    LLVMInitializeMSP430AsmPrinter();
-    LLVMInitializeNVPTXAsmPrinter();
-    LLVMInitializePowerPCAsmPrinter();
-    LLVMInitializeRISCVAsmPrinter();
-    LLVMInitializeSparcAsmPrinter();
-    LLVMInitializeSystemZAsmPrinter();
-    LLVMInitializeWebAssemblyAsmPrinter();
-    LLVMInitializeX86AsmPrinter();
-    LLVMInitializeXCoreAsmPrinter();
-}
-pub const initializeAllAsmParsers = LLVMInitializeAllAsmParsers;
-fn LLVMInitializeAllAsmParsers() callconv(.C) void {
-    LLVMInitializeAArch64AsmParser();
-    LLVMInitializeAMDGPUAsmParser();
-    LLVMInitializeARMAsmParser();
-    LLVMInitializeAVRAsmParser();
-    LLVMInitializeBPFAsmParser();
-    LLVMInitializeHexagonAsmParser();
-    LLVMInitializeLanaiAsmParser();
-    LLVMInitializeMipsAsmParser();
-    LLVMInitializeMSP430AsmParser();
-    LLVMInitializePowerPCAsmParser();
-    LLVMInitializeRISCVAsmParser();
-    LLVMInitializeSparcAsmParser();
-    LLVMInitializeSystemZAsmParser();
-    LLVMInitializeWebAssemblyAsmParser();
-    LLVMInitializeX86AsmParser();
-}
+pub extern fn LLVMInitializeAArch64Target() void;
+pub extern fn LLVMInitializeAMDGPUTarget() void;
+pub extern fn LLVMInitializeARMTarget() void;
+pub extern fn LLVMInitializeAVRTarget() void;
+pub extern fn LLVMInitializeBPFTarget() void;
+pub extern fn LLVMInitializeHexagonTarget() void;
+pub extern fn LLVMInitializeLanaiTarget() void;
+pub extern fn LLVMInitializeMipsTarget() void;
+pub extern fn LLVMInitializeMSP430Target() void;
+pub extern fn LLVMInitializeNVPTXTarget() void;
+pub extern fn LLVMInitializePowerPCTarget() void;
+pub extern fn LLVMInitializeRISCVTarget() void;
+pub extern fn LLVMInitializeSparcTarget() void;
+pub extern fn LLVMInitializeSystemZTarget() void;
+pub extern fn LLVMInitializeWebAssemblyTarget() void;
+pub extern fn LLVMInitializeX86Target() void;
+pub extern fn LLVMInitializeXCoreTarget() void;
+
+pub extern fn LLVMInitializeAArch64TargetMC() void;
+pub extern fn LLVMInitializeAMDGPUTargetMC() void;
+pub extern fn LLVMInitializeARMTargetMC() void;
+pub extern fn LLVMInitializeAVRTargetMC() void;
+pub extern fn LLVMInitializeBPFTargetMC() void;
+pub extern fn LLVMInitializeHexagonTargetMC() void;
+pub extern fn LLVMInitializeLanaiTargetMC() void;
+pub extern fn LLVMInitializeMipsTargetMC() void;
+pub extern fn LLVMInitializeMSP430TargetMC() void;
+pub extern fn LLVMInitializeNVPTXTargetMC() void;
+pub extern fn LLVMInitializePowerPCTargetMC() void;
+pub extern fn LLVMInitializeRISCVTargetMC() void;
+pub extern fn LLVMInitializeSparcTargetMC() void;
+pub extern fn LLVMInitializeSystemZTargetMC() void;
+pub extern fn LLVMInitializeWebAssemblyTargetMC() void;
+pub extern fn LLVMInitializeX86TargetMC() void;
+pub extern fn LLVMInitializeXCoreTargetMC() void;
+
+pub extern fn LLVMInitializeAArch64AsmPrinter() void;
+pub extern fn LLVMInitializeAMDGPUAsmPrinter() void;
+pub extern fn LLVMInitializeARMAsmPrinter() void;
+pub extern fn LLVMInitializeAVRAsmPrinter() void;
+pub extern fn LLVMInitializeBPFAsmPrinter() void;
+pub extern fn LLVMInitializeHexagonAsmPrinter() void;
+pub extern fn LLVMInitializeLanaiAsmPrinter() void;
+pub extern fn LLVMInitializeMipsAsmPrinter() void;
+pub extern fn LLVMInitializeMSP430AsmPrinter() void;
+pub extern fn LLVMInitializeNVPTXAsmPrinter() void;
+pub extern fn LLVMInitializePowerPCAsmPrinter() void;
+pub extern fn LLVMInitializeRISCVAsmPrinter() void;
+pub extern fn LLVMInitializeSparcAsmPrinter() void;
+pub extern fn LLVMInitializeSystemZAsmPrinter() void;
+pub extern fn LLVMInitializeWebAssemblyAsmPrinter() void;
+pub extern fn LLVMInitializeX86AsmPrinter() void;
+pub extern fn LLVMInitializeXCoreAsmPrinter() void;
+
+pub extern fn LLVMInitializeAArch64AsmParser() void;
+pub extern fn LLVMInitializeAMDGPUAsmParser() void;
+pub extern fn LLVMInitializeARMAsmParser() void;
+pub extern fn LLVMInitializeAVRAsmParser() void;
+pub extern fn LLVMInitializeBPFAsmParser() void;
+pub extern fn LLVMInitializeHexagonAsmParser() void;
+pub extern fn LLVMInitializeLanaiAsmParser() void;
+pub extern fn LLVMInitializeMipsAsmParser() void;
+pub extern fn LLVMInitializeMSP430AsmParser() void;
+pub extern fn LLVMInitializePowerPCAsmParser() void;
+pub extern fn LLVMInitializeRISCVAsmParser() void;
+pub extern fn LLVMInitializeSparcAsmParser() void;
+pub extern fn LLVMInitializeSystemZAsmParser() void;
+pub extern fn LLVMInitializeWebAssemblyAsmParser() void;
+pub extern fn LLVMInitializeX86AsmParser() void;
 
 extern fn ZigLLDLinkCOFF(argc: c_int, argv: [*:null]const ?[*:0]const u8, can_exit_early: bool) c_int;
 extern fn ZigLLDLinkELF(argc: c_int, argv: [*:null]const ?[*:0]const u8, can_exit_early: bool) c_int;
@@ -715,3 +825,23 @@ extern fn ZigLLVMWriteImportLibrary(
     output_lib_path: [*c]const u8,
     kill_at: bool,
 ) bool;
+
+pub const Linkage = enum(c_uint) {
+    External,
+    AvailableExternally,
+    LinkOnceAny,
+    LinkOnceODR,
+    LinkOnceODRAutoHide,
+    WeakAny,
+    WeakODR,
+    Appending,
+    Internal,
+    Private,
+    DLLImport,
+    DLLExport,
+    ExternalWeak,
+    Ghost,
+    Common,
+    LinkerPrivate,
+    LinkerPrivateWeak,
+};

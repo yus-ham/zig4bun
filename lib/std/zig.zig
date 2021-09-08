@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const tokenizer = @import("zig/tokenizer.zig");
 const fmt = @import("zig/fmt.zig");
@@ -15,7 +10,7 @@ pub const fmtEscapes = fmt.fmtEscapes;
 pub const isValidId = fmt.isValidId;
 pub const parse = @import("zig/parse.zig").parse;
 pub const string_literal = @import("zig/string_literal.zig");
-pub const ast = @import("zig/ast.zig");
+pub const Ast = @import("zig/Ast.zig");
 pub const system = @import("zig/system.zig");
 pub const CrossTarget = @import("zig/cross_target.zig").CrossTarget;
 
@@ -162,7 +157,6 @@ pub fn binNameAlloc(allocator: *std.mem.Allocator, options: BinNameOptions) erro
                         }
                     },
                 }
-                return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ target.libPrefix(), root_name, suffix });
             },
             .Obj => return std.fmt.allocPrint(allocator, "{s}.o", .{root_name}),
         },
@@ -182,9 +176,11 @@ pub fn binNameAlloc(allocator: *std.mem.Allocator, options: BinNameOptions) erro
         .spirv => return std.fmt.allocPrint(allocator, "{s}.spv", .{root_name}),
         .hex => return std.fmt.allocPrint(allocator, "{s}.ihex", .{root_name}),
         .raw => return std.fmt.allocPrint(allocator, "{s}.bin", .{root_name}),
-        .plan9 => return std.fmt.allocPrint(allocator, "{s}{s}", .{
-            root_name, ofmt.fileExt(target.cpu.arch),
-        }),
+        .plan9 => switch (options.output_mode) {
+            .Exe => return allocator.dupe(u8, root_name),
+            .Obj => return std.fmt.allocPrint(allocator, "{s}{s}", .{ root_name, ofmt.fileExt(target.cpu.arch) }),
+            .Lib => return std.fmt.allocPrint(allocator, "{s}{s}.a", .{ target.libPrefix(), root_name }),
+        },
     }
 }
 
