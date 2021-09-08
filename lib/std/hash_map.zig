@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const assert = debug.assert;
 const autoHash = std.hash.autoHash;
@@ -563,7 +558,22 @@ pub fn HashMap(
             return self.unmanaged.getPtrContext(key, self.ctx);
         }
         pub fn getPtrAdapted(self: Self, key: anytype, ctx: anytype) ?*V {
-            return self.unmanaged.getPtrAdapted(key, self.ctx);
+            return self.unmanaged.getPtrAdapted(key, ctx);
+        }
+
+        /// Finds the actual key associated with an adapted key in the map
+        pub fn getKey(self: Self, key: K) ?K {
+            return self.unmanaged.getKeyContext(key, self.ctx);
+        }
+        pub fn getKeyAdapted(self: Self, key: anytype, ctx: anytype) ?K {
+            return self.unmanaged.getKeyAdapted(key, ctx);
+        }
+
+        pub fn getKeyPtr(self: Self, key: K) ?*K {
+            return self.unmanaged.getKeyPtrContext(key, self.ctx);
+        }
+        pub fn getKeyPtrAdapted(self: Self, key: anytype, ctx: anytype) ?*K {
+            return self.unmanaged.getKeyPtrAdapted(key, ctx);
         }
 
         /// Finds the key and value associated with a key in the map
@@ -1127,6 +1137,38 @@ pub fn HashMapUnmanaged(
         pub fn putContext(self: *Self, allocator: *Allocator, key: K, value: V, ctx: Context) !void {
             const result = try self.getOrPutContext(allocator, key, ctx);
             result.value_ptr.* = value;
+        }
+
+        /// Get an optional pointer to the actual key associated with adapted key, if present.
+        pub fn getKeyPtr(self: Self, key: K) ?*K {
+            if (@sizeOf(Context) != 0)
+                @compileError("Cannot infer context " ++ @typeName(Context) ++ ", call getKeyPtrContext instead.");
+            return self.getKeyPtrContext(key, undefined);
+        }
+        pub fn getKeyPtrContext(self: Self, key: K, ctx: Context) ?*K {
+            return self.getKeyPtrAdapted(key, ctx);
+        }
+        pub fn getKeyPtrAdapted(self: Self, key: anytype, ctx: anytype) ?*K {
+            if (self.getIndex(key, ctx)) |idx| {
+                return &self.keys()[idx];
+            }
+            return null;
+        }
+
+        /// Get a copy of the actual key associated with adapted key, if present.
+        pub fn getKey(self: Self, key: K) ?K {
+            if (@sizeOf(Context) != 0)
+                @compileError("Cannot infer context " ++ @typeName(Context) ++ ", call getKeyContext instead.");
+            return self.getKeyContext(key, undefined);
+        }
+        pub fn getKeyContext(self: Self, key: K, ctx: Context) ?K {
+            return self.getKeyAdapted(key, ctx);
+        }
+        pub fn getKeyAdapted(self: Self, key: anytype, ctx: anytype) ?K {
+            if (self.getIndex(key, ctx)) |idx| {
+                return self.keys()[idx];
+            }
+            return null;
         }
 
         /// Get an optional pointer to the value associated with key, if present.
@@ -1953,6 +1995,7 @@ test "std.hash_map getOrPutAdapted" {
         try testing.expect(result.found_existing);
         try testing.expectEqual(real_keys[i], result.key_ptr.*);
         try testing.expectEqual(@as(u64, i) * 2, result.value_ptr.*);
+        try testing.expectEqual(real_keys[i], map.getKeyAdapted(key_str, AdaptedContext{}).?);
     }
 }
 

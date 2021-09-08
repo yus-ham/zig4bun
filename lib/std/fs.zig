@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const root = @import("root");
 const builtin = std.builtin;
 const std = @import("std.zig");
@@ -339,10 +334,10 @@ pub const Dir = struct {
                         if (rc == 0) return null;
                         if (rc < 0) {
                             switch (os.errno(rc)) {
-                                os.EBADF => unreachable, // Dir is invalid or was opened without iteration ability
-                                os.EFAULT => unreachable,
-                                os.ENOTDIR => unreachable,
-                                os.EINVAL => unreachable,
+                                .BADF => unreachable, // Dir is invalid or was opened without iteration ability
+                                .FAULT => unreachable,
+                                .NOTDIR => unreachable,
+                                .INVAL => unreachable,
                                 else => |err| return os.unexpectedErrno(err),
                             }
                         }
@@ -385,11 +380,11 @@ pub const Dir = struct {
                         else
                             os.system.getdents(self.dir.fd, &self.buf, self.buf.len);
                         switch (os.errno(rc)) {
-                            0 => {},
-                            os.EBADF => unreachable, // Dir is invalid or was opened without iteration ability
-                            os.EFAULT => unreachable,
-                            os.ENOTDIR => unreachable,
-                            os.EINVAL => unreachable,
+                            .SUCCESS => {},
+                            .BADF => unreachable, // Dir is invalid or was opened without iteration ability
+                            .FAULT => unreachable,
+                            .NOTDIR => unreachable,
+                            .INVAL => unreachable,
                             else => |err| return os.unexpectedErrno(err),
                         }
                         if (rc == 0) return null;
@@ -457,10 +452,10 @@ pub const Dir = struct {
                         if (rc == 0) return null;
                         if (rc < 0) {
                             switch (os.errno(rc)) {
-                                os.EBADF => unreachable, // Dir is invalid or was opened without iteration ability
-                                os.EFAULT => unreachable,
-                                os.ENOTDIR => unreachable,
-                                os.EINVAL => unreachable,
+                                .BADF => unreachable, // Dir is invalid or was opened without iteration ability
+                                .FAULT => unreachable,
+                                .NOTDIR => unreachable,
+                                .INVAL => unreachable,
                                 else => |err| return os.unexpectedErrno(err),
                             }
                         }
@@ -522,11 +517,11 @@ pub const Dir = struct {
                     if (self.index >= self.end_index) {
                         const rc = os.linux.getdents64(self.dir.fd, &self.buf, self.buf.len);
                         switch (os.linux.getErrno(rc)) {
-                            0 => {},
-                            os.EBADF => unreachable, // Dir is invalid or was opened without iteration ability
-                            os.EFAULT => unreachable,
-                            os.ENOTDIR => unreachable,
-                            os.EINVAL => unreachable,
+                            .SUCCESS => {},
+                            .BADF => unreachable, // Dir is invalid or was opened without iteration ability
+                            .FAULT => unreachable,
+                            .NOTDIR => unreachable,
+                            .INVAL => unreachable,
                             else => |err| return os.unexpectedErrno(err),
                         }
                         if (rc == 0) return null;
@@ -647,17 +642,20 @@ pub const Dir = struct {
             /// Memory such as file names referenced in this returned entry becomes invalid
             /// with subsequent calls to `next`, as well as when this `Dir` is deinitialized.
             pub fn next(self: *Self) Error!?Entry {
+                // We intentinally use fd_readdir even when linked with libc,
+                // since its implementation is exactly the same as below,
+                // and we avoid the code complexity here.
                 const w = os.wasi;
                 start_over: while (true) {
                     if (self.index >= self.end_index) {
                         var bufused: usize = undefined;
                         switch (w.fd_readdir(self.dir.fd, &self.buf, self.buf.len, self.cookie, &bufused)) {
-                            w.ESUCCESS => {},
-                            w.EBADF => unreachable, // Dir is invalid or was opened without iteration ability
-                            w.EFAULT => unreachable,
-                            w.ENOTDIR => unreachable,
-                            w.EINVAL => unreachable,
-                            w.ENOTCAPABLE => return error.AccessDenied,
+                            .SUCCESS => {},
+                            .BADF => unreachable, // Dir is invalid or was opened without iteration ability
+                            .FAULT => unreachable,
+                            .NOTDIR => unreachable,
+                            .INVAL => unreachable,
+                            .NOTCAPABLE => return error.AccessDenied,
                             else => |err| return os.unexpectedErrno(err),
                         }
                         if (bufused == 0) return null;
@@ -763,11 +761,12 @@ pub const Dir = struct {
             while (self.stack.items.len != 0) {
                 // `top` becomes invalid after appending to `self.stack`
                 var top = &self.stack.items[self.stack.items.len - 1];
-                const dirname_len = top.dirname_len;
+                var dirname_len = top.dirname_len;
                 if (try top.iter.next()) |base| {
                     self.name_buffer.shrinkRetainingCapacity(dirname_len);
                     if (self.name_buffer.items.len != 0) {
                         try self.name_buffer.append(path.sep);
+                        dirname_len += 1;
                     }
                     try self.name_buffer.appendSlice(base.name);
                     if (base.kind == .Directory) {
@@ -786,27 +785,36 @@ pub const Dir = struct {
                     }
                     return WalkerEntry{
                         .dir = top.iter.dir,
-                        .basename = self.name_buffer.items[dirname_len + 1 ..],
+                        .basename = self.name_buffer.items[dirname_len..],
                         .path = self.name_buffer.items,
                         .kind = base.kind,
                     };
                 } else {
-                    self.stack.pop().iter.dir.close();
+                    var item = self.stack.pop();
+                    if (self.stack.items.len != 0) {
+                        item.iter.dir.close();
+                    }
                 }
             }
             return null;
         }
 
         pub fn deinit(self: *Walker) void {
-            while (self.stack.popOrNull()) |*item| item.iter.dir.close();
+            while (self.stack.popOrNull()) |*item| {
+                if (self.stack.items.len != 0) {
+                    item.iter.dir.close();
+                }
+            }
             self.stack.deinit();
             self.name_buffer.deinit();
         }
     };
 
     /// Recursively iterates over a directory.
+    /// `self` must have been opened with `OpenDirOptions{.iterate = true}`.
     /// Must call `Walker.deinit` when done.
     /// The order of returned file system entries is undefined.
+    /// `self` will not be closed after walking it.
     pub fn walk(self: Dir, allocator: *Allocator) !Walker {
         var name_buffer = std.ArrayList(u8).init(allocator);
         errdefer name_buffer.deinit();
@@ -858,7 +866,7 @@ pub const Dir = struct {
             const path_w = try os.windows.sliceToPrefixedFileW(sub_path);
             return self.openFileW(path_w.span(), flags);
         }
-        if (builtin.os.tag == .wasi) {
+        if (builtin.os.tag == .wasi and !builtin.link_libc) {
             return self.openFileWasi(sub_path, flags);
         }
         const path_c = try os.toPosixPath(sub_path);
@@ -934,14 +942,18 @@ pub const Dir = struct {
             try os.openatZ(self.fd, sub_path, os_flags, 0);
         errdefer os.close(fd);
 
-        if (!has_flock_open_flags and flags.lock != .None) {
-            // TODO: integrate async I/O
-            const lock_nonblocking = if (flags.lock_nonblocking) os.LOCK_NB else @as(i32, 0);
-            try os.flock(fd, switch (flags.lock) {
-                .None => unreachable,
-                .Shared => os.LOCK_SH | lock_nonblocking,
-                .Exclusive => os.LOCK_EX | lock_nonblocking,
-            });
+        // WASI doesn't have os.flock so we intetinally check OS prior to the inner if block
+        // since it is not compiltime-known and we need to avoid undefined symbol in Wasm.
+        if (builtin.target.os.tag != .wasi) {
+            if (!has_flock_open_flags and flags.lock != .None) {
+                // TODO: integrate async I/O
+                const lock_nonblocking = if (flags.lock_nonblocking) os.LOCK_NB else @as(i32, 0);
+                try os.flock(fd, switch (flags.lock) {
+                    .None => unreachable,
+                    .Shared => os.LOCK_SH | lock_nonblocking,
+                    .Exclusive => os.LOCK_EX | lock_nonblocking,
+                });
+            }
         }
 
         if (has_flock_open_flags and flags.lock_nonblocking) {
@@ -1014,7 +1026,7 @@ pub const Dir = struct {
             const path_w = try os.windows.sliceToPrefixedFileW(sub_path);
             return self.createFileW(path_w.span(), flags);
         }
-        if (builtin.os.tag == .wasi) {
+        if (builtin.os.tag == .wasi and !builtin.link_libc) {
             return self.createFileWasi(sub_path, flags);
         }
         const path_c = try os.toPosixPath(sub_path);
@@ -1084,14 +1096,18 @@ pub const Dir = struct {
             try os.openatZ(self.fd, sub_path_c, os_flags, flags.mode);
         errdefer os.close(fd);
 
-        if (!has_flock_open_flags and flags.lock != .None) {
-            // TODO: integrate async I/O
-            const lock_nonblocking = if (flags.lock_nonblocking) os.LOCK_NB else @as(i32, 0);
-            try os.flock(fd, switch (flags.lock) {
-                .None => unreachable,
-                .Shared => os.LOCK_SH | lock_nonblocking,
-                .Exclusive => os.LOCK_EX | lock_nonblocking,
-            });
+        // WASI doesn't have os.flock so we intetinally check OS prior to the inner if block
+        // since it is not compiltime-known and we need to avoid undefined symbol in Wasm.
+        if (builtin.target.os.tag != .wasi) {
+            if (!has_flock_open_flags and flags.lock != .None) {
+                // TODO: integrate async I/O
+                const lock_nonblocking = if (flags.lock_nonblocking) os.LOCK_NB else @as(i32, 0);
+                try os.flock(fd, switch (flags.lock) {
+                    .None => unreachable,
+                    .Shared => os.LOCK_SH | lock_nonblocking,
+                    .Exclusive => os.LOCK_EX | lock_nonblocking,
+                });
+            }
         }
 
         if (has_flock_open_flags and flags.lock_nonblocking) {
@@ -1372,7 +1388,7 @@ pub const Dir = struct {
         if (builtin.os.tag == .windows) {
             const sub_path_w = try os.windows.sliceToPrefixedFileW(sub_path);
             return self.openDirW(sub_path_w.span().ptr, args);
-        } else if (builtin.os.tag == .wasi) {
+        } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
             return self.openDirWasi(sub_path, args);
         } else {
             const sub_path_c = try os.toPosixPath(sub_path);
@@ -1519,7 +1535,7 @@ pub const Dir = struct {
         if (builtin.os.tag == .windows) {
             const sub_path_w = try os.windows.sliceToPrefixedFileW(sub_path);
             return self.deleteFileW(sub_path_w.span());
-        } else if (builtin.os.tag == .wasi) {
+        } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
             os.unlinkatWasi(self.fd, sub_path, 0) catch |err| switch (err) {
                 error.DirNotEmpty => unreachable, // not passing AT_REMOVEDIR
                 else => |e| return e,
@@ -1582,7 +1598,7 @@ pub const Dir = struct {
         if (builtin.os.tag == .windows) {
             const sub_path_w = try os.windows.sliceToPrefixedFileW(sub_path);
             return self.deleteDirW(sub_path_w.span());
-        } else if (builtin.os.tag == .wasi) {
+        } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
             os.unlinkat(self.fd, sub_path, os.AT_REMOVEDIR) catch |err| switch (err) {
                 error.IsDir => unreachable, // not possible since we pass AT_REMOVEDIR
                 else => |e| return e,
@@ -1641,7 +1657,7 @@ pub const Dir = struct {
         sym_link_path: []const u8,
         flags: SymLinkFlags,
     ) !void {
-        if (builtin.os.tag == .wasi) {
+        if (builtin.os.tag == .wasi and !builtin.link_libc) {
             return self.symLinkWasi(target_path, sym_link_path, flags);
         }
         if (builtin.os.tag == .windows) {
@@ -1694,7 +1710,7 @@ pub const Dir = struct {
     /// The return value is a slice of `buffer`, from index `0`.
     /// Asserts that the path parameter has no null bytes.
     pub fn readLink(self: Dir, sub_path: []const u8, buffer: []u8) ![]u8 {
-        if (builtin.os.tag == .wasi) {
+        if (builtin.os.tag == .wasi and !builtin.link_libc) {
             return self.readLinkWasi(sub_path, buffer);
         }
         if (builtin.os.tag == .windows) {
@@ -2113,7 +2129,7 @@ pub const Dir = struct {
 pub fn cwd() Dir {
     if (builtin.os.tag == .windows) {
         return Dir{ .fd = os.windows.peb().ProcessParameters.CurrentDirectory.Handle };
-    } else if (builtin.os.tag == .wasi) {
+    } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         @compileError("WASI doesn't have a concept of cwd(); use std.fs.wasi.PreopenList to get available Dir handles instead");
     } else {
         return Dir{ .fd = os.AT_FDCWD };
@@ -2455,7 +2471,7 @@ pub fn selfExePath(out_buffer: []u8) SelfExePathError![]u8 {
             } else if (argv0.len != 0) {
                 // argv[0] is not empty (and not a path): search it inside PATH
                 const PATH = std.os.getenvZ("PATH") orelse return error.FileNotFound;
-                var path_it = mem.tokenize(PATH, &[_]u8{path.delimiter});
+                var path_it = mem.tokenize(u8, PATH, &[_]u8{path.delimiter});
                 while (path_it.next()) |a_path| {
                     var resolved_path_buf: [MAX_PATH_BYTES - 1:0]u8 = undefined;
                     const resolved_path = std.fmt.bufPrintZ(&resolved_path_buf, "{s}/{s}", .{
@@ -2536,12 +2552,12 @@ fn copy_file(fd_in: os.fd_t, fd_out: os.fd_t) CopyFileError!void {
     if (comptime std.Target.current.isDarwin()) {
         const rc = os.system.fcopyfile(fd_in, fd_out, null, os.system.COPYFILE_DATA);
         switch (os.errno(rc)) {
-            0 => return,
-            os.EINVAL => unreachable,
-            os.ENOMEM => return error.SystemResources,
+            .SUCCESS => return,
+            .INVAL => unreachable,
+            .NOMEM => return error.SystemResources,
             // The source file is not a directory, symbolic link, or regular file.
             // Try with the fallback path before giving up.
-            os.ENOTSUP => {},
+            .OPNOTSUPP => {},
             else => |err| return os.unexpectedErrno(err),
         }
     }

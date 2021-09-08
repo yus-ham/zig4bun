@@ -1124,6 +1124,7 @@ struct AstNodeContainerInitExpr {
 
 struct AstNodeIdentifier {
     Buf *name;
+    bool is_at_syntax;
 };
 
 struct AstNodeEnumLiteral {
@@ -1798,6 +1799,10 @@ enum BuiltinFnId {
     BuiltinFnIdReduce,
     BuiltinFnIdMaximum,
     BuiltinFnIdMinimum,
+    BuiltinFnIdSatAdd,
+    BuiltinFnIdSatSub,
+    BuiltinFnIdSatMul,
+    BuiltinFnIdSatShl,
 };
 
 struct BuiltinFnEntry {
@@ -2942,6 +2947,10 @@ enum IrBinOp {
     IrBinOpArrayMult,
     IrBinOpMaximum,
     IrBinOpMinimum,
+    IrBinOpSatAdd,
+    IrBinOpSatSub,
+    IrBinOpSatMul,
+    IrBinOpSatShl,
 };
 
 struct Stage1ZirInstBinOp {

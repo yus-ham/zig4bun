@@ -61,6 +61,15 @@ export_owners: std.AutoArrayHashMapUnmanaged(*Decl, []*Export) = .{},
 /// Keys are fully resolved file paths. This table owns the keys and values.
 import_table: std.StringArrayHashMapUnmanaged(*Scope.File) = .{},
 
+/// The set of all the generic function instantiations. This is used so that when a generic
+/// function is called twice with the same comptime parameter arguments, both calls dispatch
+/// to the same function.
+monomorphed_funcs: MonomorphedFuncsSet = .{},
+
+/// The set of all comptime function calls that have been cached so that future calls
+/// with the same parameters will get the same return value.
+memoized_calls: MemoizedCallSet = .{},
+
 /// We optimize memory usage for a compilation with no compile errors by storing the
 /// error messages and mapping outside of `Decl`.
 /// The ErrorMsg memory is owned by the decl, using Module's general purpose allocator.
@@ -113,6 +122,98 @@ compile_log_text: ArrayListUnmanaged(u8) = .{},
 emit_h: ?*GlobalEmitH,
 
 test_functions: std.AutoArrayHashMapUnmanaged(*Decl, void) = .{},
+
+const MonomorphedFuncsSet = std.HashMapUnmanaged(
+    *Fn,
+    void,
+    MonomorphedFuncsContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+const MonomorphedFuncsContext = struct {
+    pub fn eql(ctx: @This(), a: *Fn, b: *Fn) bool {
+        _ = ctx;
+        return a == b;
+    }
+
+    /// Must match `Sema.GenericCallAdapter.hash`.
+    pub fn hash(ctx: @This(), key: *Fn) u64 {
+        _ = ctx;
+        var hasher = std.hash.Wyhash.init(0);
+
+        // The generic function Decl is guaranteed to be the first dependency
+        // of each of its instantiations.
+        const generic_owner_decl = key.owner_decl.dependencies.keys()[0];
+        const generic_func = generic_owner_decl.val.castTag(.function).?.data;
+        std.hash.autoHash(&hasher, @ptrToInt(generic_func));
+
+        // This logic must be kept in sync with the logic in `analyzeCall` that
+        // computes the hash.
+        const comptime_args = key.comptime_args.?;
+        const generic_ty_info = generic_owner_decl.ty.fnInfo();
+        for (generic_ty_info.param_types) |param_ty, i| {
+            if (generic_ty_info.paramIsComptime(i) and param_ty.tag() != .generic_poison) {
+                comptime_args[i].val.hash(param_ty, &hasher);
+            }
+        }
+
+        return hasher.final();
+    }
+};
+
+pub const MemoizedCallSet = std.HashMapUnmanaged(
+    MemoizedCall.Key,
+    MemoizedCall.Result,
+    MemoizedCall,
+    std.hash_map.default_max_load_percentage,
+);
+
+pub const MemoizedCall = struct {
+    pub const Key = struct {
+        func: *Fn,
+        args: []TypedValue,
+    };
+
+    pub const Result = struct {
+        val: Value,
+        arena: std.heap.ArenaAllocator.State,
+    };
+
+    pub fn eql(ctx: @This(), a: Key, b: Key) bool {
+        _ = ctx;
+
+        if (a.func != b.func) return false;
+
+        assert(a.args.len == b.args.len);
+        for (a.args) |a_arg, arg_i| {
+            const b_arg = b.args[arg_i];
+            if (!a_arg.eql(b_arg)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// Must match `Sema.GenericCallAdapter.hash`.
+    pub fn hash(ctx: @This(), key: Key) u64 {
+        _ = ctx;
+
+        var hasher = std.hash.Wyhash.init(0);
+
+        // The generic function Decl is guaranteed to be the first dependency
+        // of each of its instantiations.
+        std.hash.autoHash(&hasher, @ptrToInt(key.func));
+
+        // This logic must be kept in sync with the logic in `analyzeCall` that
+        // computes the hash.
+        for (key.args) |arg| {
+            arg.hash(&hasher);
+        }
+
+        return hasher.final();
+    }
+};
 
 /// A `Module` has zero or one of these depending on whether `-femit-h` is enabled.
 pub const GlobalEmitH = struct {
@@ -511,8 +612,8 @@ pub const Decl = struct {
                 assert(struct_obj.owner_decl == decl);
                 return &struct_obj.namespace;
             },
-            .enum_full => {
-                const enum_obj = ty.castTag(.enum_full).?.data;
+            .enum_full, .enum_nonexhaustive => {
+                const enum_obj = ty.cast(Type.Payload.EnumFull).?.data;
                 assert(enum_obj.owner_decl == decl);
                 return &enum_obj.namespace;
             },
@@ -617,6 +718,7 @@ pub const Struct = struct {
     /// is necessary to determine whether it has bits at runtime.
     known_has_bits: bool,
 
+    /// The `Type` and `Value` memory is owned by the arena of the Struct's owner_decl.
     pub const Field = struct {
         /// Uses `noreturn` to indicate `anytype`.
         /// undefined until `status` is `have_field_types` or `have_layout`.
@@ -757,6 +859,11 @@ pub const Union = struct {
 pub const Fn = struct {
     /// The Decl that corresponds to the function itself.
     owner_decl: *Decl,
+    /// If this is not null, this function is a generic function instantiation, and
+    /// there is a `TypedValue` here for each parameter of the function.
+    /// Non-comptime parameters are marked with a `generic_poison` for the value.
+    /// Non-anytype parameters are marked with a `generic_poison` for the type.
+    comptime_args: ?[*]TypedValue = null,
     /// The ZIR instruction that is a function instruction. Use this to find
     /// the body. We store this rather than the body directly so that when ZIR
     /// is regenerated on update(), we can map this to the new corresponding
@@ -795,6 +902,9 @@ pub const Fn = struct {
 
     pub fn getInferredErrorSet(func: *Fn) ?*std.StringHashMapUnmanaged(void) {
         const ret_ty = func.owner_decl.ty.fnReturnType();
+        if (ret_ty.tag() == .generic_poison) {
+            return null;
+        }
         if (ret_ty.zigTypeTag() == .ErrorUnion) {
             if (ret_ty.errorUnionSet().castTag(.error_set_inferred)) |payload| {
                 return &payload.data.map;
@@ -1169,6 +1279,8 @@ pub const Scope = struct {
         /// for the one that will be the same for all Block instances.
         src_decl: *Decl,
         instructions: ArrayListUnmanaged(Air.Inst.Index),
+        // `param` instructions are collected here to be used by the `func` instruction.
+        params: std.ArrayListUnmanaged(Param) = .{},
         label: ?*Label = null,
         inlining: ?*Inlining,
         /// If runtime_index is not 0 then one of these is guaranteed to be non null.
@@ -1182,6 +1294,12 @@ pub const Scope = struct {
 
         /// when null, it is determined by build mode, changed by @setRuntimeSafety
         want_safety: ?bool = null,
+
+        const Param = struct {
+            /// `noreturn` means `anytype`.
+            ty: Type,
+            is_comptime: bool,
+        };
 
         /// This `Block` maps a block ZIR instruction to the corresponding
         /// AIR instruction for break instruction analysis.
@@ -1313,6 +1431,16 @@ pub const Scope = struct {
                 .data = .{ .bin_op = .{
                     .lhs = lhs,
                     .rhs = rhs,
+                } },
+            });
+        }
+
+        pub fn addArg(block: *Block, ty: Type, name: u32) error{OutOfMemory}!Air.Inst.Ref {
+            return block.addInst(.{
+                .tag = .arg,
+                .data = .{ .ty_str = .{
+                    .ty = try block.sema.addType(ty),
+                    .str = name,
                 } },
             });
         }
@@ -1630,8 +1758,11 @@ pub const SrcLoc = struct {
                     .@"asm" => tree.asmFull(node),
                     else => unreachable,
                 };
+                const asm_output = full.outputs[0];
+                const node_datas = tree.nodes.items(.data);
+                const ret_ty_node = node_datas[asm_output].lhs;
                 const main_tokens = tree.nodes.items(.main_token);
-                const tok_index = main_tokens[full.outputs[0]];
+                const tok_index = main_tokens[ret_ty_node];
                 const token_starts = tree.tokens.items(.start);
                 return token_starts[tok_index];
             },
@@ -2095,7 +2226,20 @@ pub const LazySrcLoc = union(enum) {
 };
 
 pub const SemaError = error{ OutOfMemory, AnalysisFail };
-pub const CompileError = error{ OutOfMemory, AnalysisFail, NeededSourceLocation };
+pub const CompileError = error{
+    OutOfMemory,
+    /// When this is returned, the compile error for the failure has already been recorded.
+    AnalysisFail,
+    /// Returned when a compile error needed to be reported but a provided LazySrcLoc was set
+    /// to the `unneeded` tag. The source location was, in fact, needed. It is expected that
+    /// somewhere up the call stack, the operation will be retried after doing expensive work
+    /// to compute a source location.
+    NeededSourceLocation,
+    /// A Type or Value was needed to be used during semantic analysis, but it was not available
+    /// because the function is generic. This is only seen when analyzing the body of a param
+    /// instruction.
+    GenericPoison,
+};
 
 pub fn deinit(mod: *Module) void {
     const gpa = mod.gpa;
@@ -2169,14 +2313,26 @@ pub fn deinit(mod: *Module) void {
     }
     mod.export_owners.deinit(gpa);
 
-    var it = mod.global_error_set.keyIterator();
-    while (it.next()) |key| {
-        gpa.free(key.*);
+    {
+        var it = mod.global_error_set.keyIterator();
+        while (it.next()) |key| {
+            gpa.free(key.*);
+        }
+        mod.global_error_set.deinit(gpa);
     }
-    mod.global_error_set.deinit(gpa);
 
     mod.error_name_list.deinit(gpa);
     mod.test_functions.deinit(gpa);
+    mod.monomorphed_funcs.deinit(gpa);
+
+    {
+        var it = mod.memoized_calls.iterator();
+        while (it.next()) |entry| {
+            gpa.free(entry.key_ptr.args);
+            entry.value_ptr.arena.promote(gpa).deinit();
+        }
+        mod.memoized_calls.deinit(gpa);
+    }
 }
 
 fn freeExportList(gpa: *Allocator, export_list: []*Export) void {
@@ -2492,7 +2648,10 @@ pub fn astGenFile(mod: *Module, file: *Scope.File) !void {
         undefined;
     defer if (data_has_safety_tag) gpa.free(safety_buffer);
     const data_ptr = if (data_has_safety_tag)
-        @ptrCast([*]const u8, safety_buffer.ptr)
+        if (file.zir.instructions.len == 0)
+            @as([*]const u8, undefined)
+        else
+            @ptrCast([*]const u8, safety_buffer.ptr)
     else
         @ptrCast([*]const u8, file.zir.instructions.items(.data).ptr);
     if (data_has_safety_tag) {
@@ -2792,14 +2951,16 @@ pub fn ensureDeclAnalyzed(mod: *Module, decl: *Decl) SemaError!void {
             }
             return error.AnalysisFail;
         },
-        else => {
+        error.NeededSourceLocation => unreachable,
+        error.GenericPoison => unreachable,
+        else => |e| {
             decl.analysis = .sema_failure_retryable;
             try mod.failed_decls.ensureUnusedCapacity(mod.gpa, 1);
             mod.failed_decls.putAssumeCapacityNoClobber(decl, try ErrorMsg.create(
                 mod.gpa,
                 decl.srcLoc(),
                 "unable to analyze: {s}",
-                .{@errorName(err)},
+                .{@errorName(e)},
             ));
             return error.AnalysisFail;
         },
@@ -2898,8 +3059,8 @@ pub fn semaFile(mod: *Module, file: *Scope.File) SemaError!void {
             .owner_decl = new_decl,
             .namespace = &struct_obj.namespace,
             .func = null,
+            .fn_ret_ty = Type.initTag(.void),
             .owner_func = null,
-            .param_inst_list = &.{},
         };
         defer sema.deinit();
         var block_scope: Scope.Block = .{
@@ -2953,8 +3114,8 @@ fn semaDecl(mod: *Module, decl: *Decl) !bool {
         .owner_decl = decl,
         .namespace = decl.namespace,
         .func = null,
+        .fn_ret_ty = Type.initTag(.void),
         .owner_func = null,
-        .param_inst_list = &.{},
     };
     defer sema.deinit();
 
@@ -2980,7 +3141,10 @@ fn semaDecl(mod: *Module, decl: *Decl) !bool {
         .inlining = null,
         .is_comptime = true,
     };
-    defer block_scope.instructions.deinit(gpa);
+    defer {
+        block_scope.instructions.deinit(gpa);
+        block_scope.params.deinit(gpa);
+    }
 
     const zir_block_index = decl.zirBlockIndex();
     const inst_data = zir_datas[zir_block_index].pl_node;
@@ -3000,6 +3164,9 @@ fn semaDecl(mod: *Module, decl: *Decl) !bool {
         if (linksection_ref == .none) break :blk Value.initTag(.null_value);
         break :blk (try sema.resolveInstConst(&block_scope, src, linksection_ref)).val;
     };
+    // Note this resolves the type of the Decl, not the value; if this Decl
+    // is a struct, for example, this resolves `type` (which needs no resolution),
+    // not the struct itself.
     try sema.resolveTypeLayout(&block_scope, src, decl_tv.ty);
 
     // We need the memory for the Type to go into the arena for the Decl
@@ -3102,6 +3269,15 @@ fn semaDecl(mod: *Module, decl: *Decl) !bool {
         if (type_changed and mod.emit_h != null) {
             try mod.comp.work_queue.writeItem(.{ .emit_h_decl = decl });
         }
+    } else if (decl_tv.ty.zigTypeTag() == .Type) {
+        // In case this Decl is a struct or union, we need to resolve the fields
+        // while we still have the `Sema` in scope, so that the field type expressions
+        // can use the resolved AIR instructions that they possibly reference.
+        // We do this after the decl is populated and set to `complete` so that a `Decl`
+        // may reference itself.
+        var buffer: Value.ToTypeBuffer = undefined;
+        const ty = decl.val.toType(&buffer);
+        try sema.resolveDeclFields(&block_scope, src, ty);
     }
 
     if (decl.is_exported) {
@@ -3625,8 +3801,6 @@ pub fn analyzeFnBody(mod: *Module, decl: *Decl, func: *Fn) SemaError!Air {
     defer decl.value_arena.?.* = arena.state;
 
     const fn_ty = decl.ty;
-    const param_inst_list = try gpa.alloc(Air.Inst.Ref, fn_ty.fnParamLen());
-    defer gpa.free(param_inst_list);
 
     var sema: Sema = .{
         .mod = mod,
@@ -3636,8 +3810,8 @@ pub fn analyzeFnBody(mod: *Module, decl: *Decl, func: *Fn) SemaError!Air {
         .owner_decl = decl,
         .namespace = decl.namespace,
         .func = func,
+        .fn_ret_ty = func.owner_decl.ty.fnReturnType(),
         .owner_func = func,
-        .param_inst_list = param_inst_list,
     };
     defer sema.deinit();
 
@@ -3656,29 +3830,71 @@ pub fn analyzeFnBody(mod: *Module, decl: *Decl, func: *Fn) SemaError!Air {
     };
     defer inner_block.instructions.deinit(gpa);
 
-    // AIR requires the arg parameters to be the first N instructions.
-    try inner_block.instructions.ensureTotalCapacity(gpa, param_inst_list.len);
-    for (param_inst_list) |*param_inst, param_index| {
-        const param_type = fn_ty.fnParamType(param_index);
+    const fn_info = sema.code.getFnInfo(func.zir_body_inst);
+    const zir_tags = sema.code.instructions.items(.tag);
+
+    // Here we are performing "runtime semantic analysis" for a function body, which means
+    // we must map the parameter ZIR instructions to `arg` AIR instructions.
+    // AIR requires the `arg` parameters to be the first N instructions.
+    // This could be a generic function instantiation, however, in which case we need to
+    // map the comptime parameters to constant values and only emit arg AIR instructions
+    // for the runtime ones.
+    const runtime_params_len = @intCast(u32, fn_ty.fnParamLen());
+    try inner_block.instructions.ensureTotalCapacity(gpa, runtime_params_len);
+    try sema.air_instructions.ensureUnusedCapacity(gpa, fn_info.total_params_len * 2); // * 2 for the `addType`
+    try sema.inst_map.ensureUnusedCapacity(gpa, fn_info.total_params_len);
+
+    var runtime_param_index: usize = 0;
+    var total_param_index: usize = 0;
+    for (fn_info.param_body) |inst| {
+        const name = switch (zir_tags[inst]) {
+            .param, .param_comptime => blk: {
+                const inst_data = sema.code.instructions.items(.data)[inst].pl_tok;
+                const extra = sema.code.extraData(Zir.Inst.Param, inst_data.payload_index).data;
+                break :blk extra.name;
+            },
+
+            .param_anytype, .param_anytype_comptime => blk: {
+                const str_tok = sema.code.instructions.items(.data)[inst].str_tok;
+                break :blk str_tok.start;
+            },
+
+            else => continue,
+        };
+        if (func.comptime_args) |comptime_args| {
+            const arg_tv = comptime_args[total_param_index];
+            if (arg_tv.val.tag() != .generic_poison) {
+                // We have a comptime value for this parameter.
+                const arg = try sema.addConstant(arg_tv.ty, arg_tv.val);
+                sema.inst_map.putAssumeCapacityNoClobber(inst, arg);
+                total_param_index += 1;
+                continue;
+            }
+        }
+        const param_type = fn_ty.fnParamType(runtime_param_index);
         const ty_ref = try sema.addType(param_type);
         const arg_index = @intCast(u32, sema.air_instructions.len);
         inner_block.instructions.appendAssumeCapacity(arg_index);
-        param_inst.* = Air.indexToRef(arg_index);
-        try sema.air_instructions.append(gpa, .{
+        sema.air_instructions.appendAssumeCapacity(.{
             .tag = .arg,
-            .data = .{
-                .ty_str = .{
-                    .ty = ty_ref,
-                    .str = undefined, // Set in the semantic analysis of the arg instruction.
-                },
-            },
+            .data = .{ .ty_str = .{
+                .ty = ty_ref,
+                .str = name,
+            } },
         });
+        sema.inst_map.putAssumeCapacityNoClobber(inst, Air.indexToRef(arg_index));
+        total_param_index += 1;
+        runtime_param_index += 1;
     }
 
     func.state = .in_progress;
     log.debug("set {s} to in_progress", .{decl.name});
 
-    try sema.analyzeFnBody(&inner_block, func.zir_body_inst);
+    _ = sema.analyzeBody(&inner_block, fn_info.body) catch |err| switch (err) {
+        error.NeededSourceLocation => @panic("zig compiler bug: NeededSourceLocation"),
+        error.GenericPoison => @panic("zig compiler bug: GenericPoison"),
+        else => |e| return e,
+    };
 
     // Copy the block into place and mark that as the main block.
     try sema.air_extra.ensureUnusedCapacity(gpa, @typeInfo(Air.Block).Struct.fields.len +
@@ -3714,7 +3930,7 @@ fn markOutdatedDecl(mod: *Module, decl: *Decl) !void {
     decl.analysis = .outdated;
 }
 
-fn allocateNewDecl(mod: *Module, namespace: *Scope.Namespace, src_node: ast.Node.Index) !*Decl {
+pub fn allocateNewDecl(mod: *Module, namespace: *Scope.Namespace, src_node: ast.Node.Index) !*Decl {
     // If we have emit-h then we must allocate a bigger structure to store the emit-h state.
     const new_decl: *Decl = if (mod.emit_h != null) blk: {
         const parent_struct = try mod.gpa.create(DeclPlusEmitH);
@@ -3893,7 +4109,6 @@ pub fn createAnonymousDeclFromDeclNamed(
     new_decl.ty = typed_value.ty;
     new_decl.val = typed_value.val;
     new_decl.has_tv = true;
-    new_decl.owns_tv = true;
     new_decl.analysis = .complete;
     new_decl.generation = mod.generation;
 
@@ -4268,308 +4483,56 @@ pub const SwitchProngSrc = union(enum) {
     }
 };
 
-pub fn analyzeStructFields(mod: *Module, struct_obj: *Struct) CompileError!void {
-    const tracy = trace(@src());
-    defer tracy.end();
+pub const PeerTypeCandidateSrc = union(enum) {
+    /// Do not print out error notes for candidate sources
+    none: void,
+    /// When we want to know the the src of candidate i, look up at
+    /// index i in this slice
+    override: []LazySrcLoc,
+    /// resolvePeerTypes originates from a @TypeOf(...) call
+    typeof_builtin_call_node_offset: i32,
 
-    const gpa = mod.gpa;
-    const zir = struct_obj.owner_decl.namespace.file_scope.zir;
-    const extended = zir.instructions.items(.data)[struct_obj.zir_index].extended;
-    assert(extended.opcode == .struct_decl);
-    const small = @bitCast(Zir.Inst.StructDecl.Small, extended.small);
-    var extra_index: usize = extended.operand;
+    pub fn resolve(
+        self: PeerTypeCandidateSrc,
+        gpa: *Allocator,
+        decl: *Decl,
+        candidates: usize,
+        candidate_i: usize,
+    ) ?LazySrcLoc {
+        @setCold(true);
 
-    const src: LazySrcLoc = .{ .node_offset = struct_obj.node_offset };
-    extra_index += @boolToInt(small.has_src_node);
+        switch (self) {
+            .none => {
+                return null;
+            },
+            .override => |candidate_srcs| {
+                return candidate_srcs[candidate_i];
+            },
+            .typeof_builtin_call_node_offset => |node_offset| {
+                if (candidates <= 2) {
+                    switch (candidate_i) {
+                        0 => return LazySrcLoc{ .node_offset_builtin_call_arg0 = node_offset },
+                        1 => return LazySrcLoc{ .node_offset_builtin_call_arg1 = node_offset },
+                        else => unreachable,
+                    }
+                }
 
-    const body_len = if (small.has_body_len) blk: {
-        const body_len = zir.extra[extra_index];
-        extra_index += 1;
-        break :blk body_len;
-    } else 0;
+                const tree = decl.namespace.file_scope.getTree(gpa) catch |err| {
+                    // In this case we emit a warning + a less precise source location.
+                    log.warn("unable to load {s}: {s}", .{
+                        decl.namespace.file_scope.sub_file_path, @errorName(err),
+                    });
+                    return LazySrcLoc{ .node_offset = 0 };
+                };
+                const node = decl.relativeToNodeIndex(node_offset);
+                const node_datas = tree.nodes.items(.data);
+                const params = tree.extra_data[node_datas[node].lhs..node_datas[node].rhs];
 
-    const fields_len = if (small.has_fields_len) blk: {
-        const fields_len = zir.extra[extra_index];
-        extra_index += 1;
-        break :blk fields_len;
-    } else 0;
-
-    const decls_len = if (small.has_decls_len) decls_len: {
-        const decls_len = zir.extra[extra_index];
-        extra_index += 1;
-        break :decls_len decls_len;
-    } else 0;
-
-    // Skip over decls.
-    var decls_it = zir.declIteratorInner(extra_index, decls_len);
-    while (decls_it.next()) |_| {}
-    extra_index = decls_it.extra_index;
-
-    const body = zir.extra[extra_index..][0..body_len];
-    if (fields_len == 0) {
-        assert(body.len == 0);
-        return;
-    }
-    extra_index += body.len;
-
-    var decl_arena = struct_obj.owner_decl.value_arena.?.promote(gpa);
-    defer struct_obj.owner_decl.value_arena.?.* = decl_arena.state;
-
-    try struct_obj.fields.ensureCapacity(&decl_arena.allocator, fields_len);
-
-    // We create a block for the field type instructions because they
-    // may need to reference Decls from inside the struct namespace.
-    // Within the field type, default value, and alignment expressions, the "owner decl"
-    // should be the struct itself. Thus we need a new Sema.
-    var sema: Sema = .{
-        .mod = mod,
-        .gpa = gpa,
-        .arena = &decl_arena.allocator,
-        .code = zir,
-        .owner_decl = struct_obj.owner_decl,
-        .namespace = &struct_obj.namespace,
-        .owner_func = null,
-        .func = null,
-        .param_inst_list = &.{},
-    };
-    defer sema.deinit();
-
-    var block: Scope.Block = .{
-        .parent = null,
-        .sema = &sema,
-        .src_decl = struct_obj.owner_decl,
-        .instructions = .{},
-        .inlining = null,
-        .is_comptime = true,
-    };
-    defer assert(block.instructions.items.len == 0); // should all be comptime instructions
-
-    if (body.len != 0) {
-        _ = try sema.analyzeBody(&block, body);
-    }
-
-    const bits_per_field = 4;
-    const fields_per_u32 = 32 / bits_per_field;
-    const bit_bags_count = std.math.divCeil(usize, fields_len, fields_per_u32) catch unreachable;
-    var bit_bag_index: usize = extra_index;
-    extra_index += bit_bags_count;
-    var cur_bit_bag: u32 = undefined;
-    var field_i: u32 = 0;
-    while (field_i < fields_len) : (field_i += 1) {
-        if (field_i % fields_per_u32 == 0) {
-            cur_bit_bag = zir.extra[bit_bag_index];
-            bit_bag_index += 1;
-        }
-        const has_align = @truncate(u1, cur_bit_bag) != 0;
-        cur_bit_bag >>= 1;
-        const has_default = @truncate(u1, cur_bit_bag) != 0;
-        cur_bit_bag >>= 1;
-        const is_comptime = @truncate(u1, cur_bit_bag) != 0;
-        cur_bit_bag >>= 1;
-        const unused = @truncate(u1, cur_bit_bag) != 0;
-        cur_bit_bag >>= 1;
-
-        _ = unused;
-
-        const field_name_zir = zir.nullTerminatedString(zir.extra[extra_index]);
-        extra_index += 1;
-        const field_type_ref = @intToEnum(Zir.Inst.Ref, zir.extra[extra_index]);
-        extra_index += 1;
-
-        // This string needs to outlive the ZIR code.
-        const field_name = try decl_arena.allocator.dupe(u8, field_name_zir);
-        if (field_type_ref == .none) {
-            return mod.fail(&block.base, src, "TODO: implement anytype struct field", .{});
-        }
-        const field_ty: Type = if (field_type_ref == .none)
-            Type.initTag(.noreturn)
-        else
-            // TODO: if we need to report an error here, use a source location
-            // that points to this type expression rather than the struct.
-            // But only resolve the source location if we need to emit a compile error.
-            try sema.resolveType(&block, src, field_type_ref);
-
-        const gop = struct_obj.fields.getOrPutAssumeCapacity(field_name);
-        assert(!gop.found_existing);
-        gop.value_ptr.* = .{
-            .ty = field_ty,
-            .abi_align = Value.initTag(.abi_align_default),
-            .default_val = Value.initTag(.unreachable_value),
-            .is_comptime = is_comptime,
-            .offset = undefined,
-        };
-
-        if (has_align) {
-            const align_ref = @intToEnum(Zir.Inst.Ref, zir.extra[extra_index]);
-            extra_index += 1;
-            // TODO: if we need to report an error here, use a source location
-            // that points to this alignment expression rather than the struct.
-            // But only resolve the source location if we need to emit a compile error.
-            gop.value_ptr.abi_align = (try sema.resolveInstConst(&block, src, align_ref)).val;
-        }
-        if (has_default) {
-            const default_ref = @intToEnum(Zir.Inst.Ref, zir.extra[extra_index]);
-            extra_index += 1;
-            // TODO: if we need to report an error here, use a source location
-            // that points to this default value expression rather than the struct.
-            // But only resolve the source location if we need to emit a compile error.
-            gop.value_ptr.default_val = (try sema.resolveInstConst(&block, src, default_ref)).val;
+                return LazySrcLoc{ .node_abs = params[candidate_i] };
+            },
         }
     }
-}
-
-pub fn analyzeUnionFields(mod: *Module, union_obj: *Union) CompileError!void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    const gpa = mod.gpa;
-    const zir = union_obj.owner_decl.namespace.file_scope.zir;
-    const extended = zir.instructions.items(.data)[union_obj.zir_index].extended;
-    assert(extended.opcode == .union_decl);
-    const small = @bitCast(Zir.Inst.UnionDecl.Small, extended.small);
-    var extra_index: usize = extended.operand;
-
-    const src: LazySrcLoc = .{ .node_offset = union_obj.node_offset };
-    extra_index += @boolToInt(small.has_src_node);
-
-    if (small.has_tag_type) {
-        extra_index += 1;
-    }
-
-    const body_len = if (small.has_body_len) blk: {
-        const body_len = zir.extra[extra_index];
-        extra_index += 1;
-        break :blk body_len;
-    } else 0;
-
-    const fields_len = if (small.has_fields_len) blk: {
-        const fields_len = zir.extra[extra_index];
-        extra_index += 1;
-        break :blk fields_len;
-    } else 0;
-
-    const decls_len = if (small.has_decls_len) decls_len: {
-        const decls_len = zir.extra[extra_index];
-        extra_index += 1;
-        break :decls_len decls_len;
-    } else 0;
-
-    // Skip over decls.
-    var decls_it = zir.declIteratorInner(extra_index, decls_len);
-    while (decls_it.next()) |_| {}
-    extra_index = decls_it.extra_index;
-
-    const body = zir.extra[extra_index..][0..body_len];
-    if (fields_len == 0) {
-        assert(body.len == 0);
-        return;
-    }
-    extra_index += body.len;
-
-    var decl_arena = union_obj.owner_decl.value_arena.?.promote(gpa);
-    defer union_obj.owner_decl.value_arena.?.* = decl_arena.state;
-
-    try union_obj.fields.ensureCapacity(&decl_arena.allocator, fields_len);
-
-    // We create a block for the field type instructions because they
-    // may need to reference Decls from inside the struct namespace.
-    // Within the field type, default value, and alignment expressions, the "owner decl"
-    // should be the struct itself. Thus we need a new Sema.
-    var sema: Sema = .{
-        .mod = mod,
-        .gpa = gpa,
-        .arena = &decl_arena.allocator,
-        .code = zir,
-        .owner_decl = union_obj.owner_decl,
-        .namespace = &union_obj.namespace,
-        .owner_func = null,
-        .func = null,
-        .param_inst_list = &.{},
-    };
-    defer sema.deinit();
-
-    var block: Scope.Block = .{
-        .parent = null,
-        .sema = &sema,
-        .src_decl = union_obj.owner_decl,
-        .instructions = .{},
-        .inlining = null,
-        .is_comptime = true,
-    };
-    defer assert(block.instructions.items.len == 0); // should all be comptime instructions
-
-    if (body.len != 0) {
-        _ = try sema.analyzeBody(&block, body);
-    }
-
-    const bits_per_field = 4;
-    const fields_per_u32 = 32 / bits_per_field;
-    const bit_bags_count = std.math.divCeil(usize, fields_len, fields_per_u32) catch unreachable;
-    var bit_bag_index: usize = extra_index;
-    extra_index += bit_bags_count;
-    var cur_bit_bag: u32 = undefined;
-    var field_i: u32 = 0;
-    while (field_i < fields_len) : (field_i += 1) {
-        if (field_i % fields_per_u32 == 0) {
-            cur_bit_bag = zir.extra[bit_bag_index];
-            bit_bag_index += 1;
-        }
-        const has_type = @truncate(u1, cur_bit_bag) != 0;
-        cur_bit_bag >>= 1;
-        const has_align = @truncate(u1, cur_bit_bag) != 0;
-        cur_bit_bag >>= 1;
-        const has_tag = @truncate(u1, cur_bit_bag) != 0;
-        cur_bit_bag >>= 1;
-        const unused = @truncate(u1, cur_bit_bag) != 0;
-        cur_bit_bag >>= 1;
-        _ = unused;
-
-        const field_name_zir = zir.nullTerminatedString(zir.extra[extra_index]);
-        extra_index += 1;
-
-        const field_type_ref: Zir.Inst.Ref = if (has_type) blk: {
-            const field_type_ref = @intToEnum(Zir.Inst.Ref, zir.extra[extra_index]);
-            extra_index += 1;
-            break :blk field_type_ref;
-        } else .none;
-
-        const align_ref: Zir.Inst.Ref = if (has_align) blk: {
-            const align_ref = @intToEnum(Zir.Inst.Ref, zir.extra[extra_index]);
-            extra_index += 1;
-            break :blk align_ref;
-        } else .none;
-
-        if (has_tag) {
-            extra_index += 1;
-        }
-
-        // This string needs to outlive the ZIR code.
-        const field_name = try decl_arena.allocator.dupe(u8, field_name_zir);
-        const field_ty: Type = if (field_type_ref == .none)
-            Type.initTag(.void)
-        else
-            // TODO: if we need to report an error here, use a source location
-            // that points to this type expression rather than the union.
-            // But only resolve the source location if we need to emit a compile error.
-            try sema.resolveType(&block, src, field_type_ref);
-
-        const gop = union_obj.fields.getOrPutAssumeCapacity(field_name);
-        assert(!gop.found_existing);
-        gop.value_ptr.* = .{
-            .ty = field_ty,
-            .abi_align = Value.initTag(.abi_align_default),
-        };
-
-        if (align_ref != .none) {
-            // TODO: if we need to report an error here, use a source location
-            // that points to this alignment expression rather than the struct.
-            // But only resolve the source location if we need to emit a compile error.
-            gop.value_ptr.abi_align = (try sema.resolveInstConst(&block, src, align_ref)).val;
-        }
-    }
-
-    // TODO resolve the union tag_type_ref
-}
+};
 
 /// Called from `performAllTheWork`, after all AstGen workers have finished,
 /// and before the main semantic analysis loop begins.

@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 // This file contains thin wrappers around Windows-specific APIs, with these
 // specific goals in mind:
 // * Convert "errno"-style error codes into Zig errors.
@@ -1728,15 +1723,15 @@ pub fn teb() *TEB {
     return switch (builtin.target.cpu.arch) {
         .i386 => asm volatile (
             \\ movl %%fs:0x18, %[ptr]
-            : [ptr] "=r" (-> *TEB)
+            : [ptr] "=r" (-> *TEB),
         ),
         .x86_64 => asm volatile (
             \\ movq %%gs:0x30, %[ptr]
-            : [ptr] "=r" (-> *TEB)
+            : [ptr] "=r" (-> *TEB),
         ),
         .aarch64 => asm volatile (
             \\ mov %[ptr], x18
-            : [ptr] "=r" (-> *TEB)
+            : [ptr] "=r" (-> *TEB),
         ),
         else => @compileError("unsupported arch"),
     };

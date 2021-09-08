@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const root = @import("@build");
 const std = @import("std");
 const builtin = @import("builtin");
@@ -250,6 +245,13 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
             });
             defer allocator.free(name);
             try out_stream.print("{s:<30} {s}\n", .{ name, option.description });
+            if (option.enum_options) |enum_options| {
+                const padding = " " ** 33;
+                try out_stream.writeAll(padding ++ "Supported Values:\n");
+                for (enum_options) |enum_option| {
+                    try out_stream.print(padding ++ "  {s}\n", .{enum_option});
+                }
+            }
         }
     }
 

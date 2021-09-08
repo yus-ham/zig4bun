@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
@@ -34,6 +29,7 @@ pub const Address = extern union {
             error.InvalidEnd,
             error.InvalidCharacter,
             error.Incomplete,
+            error.NonCanonical,
             => {},
         }
 
@@ -55,6 +51,7 @@ pub const Address = extern union {
             error.InvalidEnd,
             error.InvalidCharacter,
             error.Incomplete,
+            error.NonCanonical,
             => {},
         }
 
@@ -204,6 +201,7 @@ pub const Ip4Address = extern struct {
         var x: u8 = 0;
         var index: u8 = 0;
         var saw_any_digits = false;
+        var has_zero_prefix = false;
         for (buf) |c| {
             if (c == '.') {
                 if (!saw_any_digits) {
@@ -216,7 +214,13 @@ pub const Ip4Address = extern struct {
                 index += 1;
                 x = 0;
                 saw_any_digits = false;
+                has_zero_prefix = false;
             } else if (c >= '0' and c <= '9') {
+                if (c == '0' and !saw_any_digits) {
+                    has_zero_prefix = true;
+                } else if (has_zero_prefix) {
+                    return error.NonCanonical;
+                }
                 saw_any_digits = true;
                 x = try std.math.mul(u8, x, 10);
                 x = try std.math.add(u8, x, c - '0');
@@ -1130,9 +1134,9 @@ fn linuxLookupNameFromHosts(
         },
         else => |e| return e,
     }) |line| {
-        const no_comment_line = mem.split(line, "#").next().?;
+        const no_comment_line = mem.split(u8, line, "#").next().?;
 
-        var line_it = mem.tokenize(no_comment_line, " \t");
+        var line_it = mem.tokenize(u8, no_comment_line, " \t");
         const ip_text = line_it.next() orelse continue;
         var first_name_text: ?[]const u8 = null;
         while (line_it.next()) |name_text| {
@@ -1149,6 +1153,7 @@ fn linuxLookupNameFromHosts(
             error.Incomplete,
             error.InvalidIPAddressFormat,
             error.InvalidIpv4Mapping,
+            error.NonCanonical,
             => continue,
         };
         try addrs.append(LookupAddr{ .addr = addr });
@@ -1211,7 +1216,7 @@ fn linuxLookupNameFromDnsSearch(
     mem.copy(u8, canon.items, canon_name);
     try canon.append('.');
 
-    var tok_it = mem.tokenize(search, " \t");
+    var tok_it = mem.tokenize(u8, search, " \t");
     while (tok_it.next()) |tok| {
         canon.shrinkRetainingCapacity(canon_name.len + 1);
         try canon.appendSlice(tok);
@@ -1328,13 +1333,13 @@ fn getResolvConf(allocator: *mem.Allocator, rc: *ResolvConf) !void {
         },
         else => |e| return e,
     }) |line| {
-        const no_comment_line = mem.split(line, "#").next().?;
-        var line_it = mem.tokenize(no_comment_line, " \t");
+        const no_comment_line = mem.split(u8, line, "#").next().?;
+        var line_it = mem.tokenize(u8, no_comment_line, " \t");
 
         const token = line_it.next() orelse continue;
         if (mem.eql(u8, token, "options")) {
             while (line_it.next()) |sub_tok| {
-                var colon_it = mem.split(sub_tok, ":");
+                var colon_it = mem.split(u8, sub_tok, ":");
                 const name = colon_it.next().?;
                 const value_txt = colon_it.next() orelse continue;
                 const value = std.fmt.parseInt(u8, value_txt, 10) catch |err| switch (err) {

@@ -1,9 +1,5 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 // Convenience types and consts used by std.os module
+const builtin = @import("builtin");
 const posix = @import("posix.zig");
 pub const iovec = posix.iovec;
 pub const iovec_const = posix.iovec_const;
@@ -12,7 +8,7 @@ pub const STDIN_FILENO = 0;
 pub const STDOUT_FILENO = 1;
 pub const STDERR_FILENO = 2;
 
-pub const mode_t = u0;
+pub const mode_t = u32;
 
 pub const time_t = i64; // match https://github.com/CraneStation/wasi-libc
 
@@ -75,7 +71,10 @@ pub const kernel_stat = struct {
     }
 };
 
-pub const AT_REMOVEDIR: u32 = 1; // there's no AT_REMOVEDIR in WASI, but we simulate here to match other OSes
+pub const IOV_MAX = 1024;
+
+pub const AT_REMOVEDIR: u32 = 0x4;
+pub const AT_FDCWD: fd_t = -2;
 
 // As defined in the wasi_snapshot_preview1 spec file:
 // https://github.com/WebAssembly/WASI/blob/master/phases/snapshot/witx/typenames.witx
@@ -107,84 +106,89 @@ pub const dirent_t = extern struct {
     d_type: filetype_t,
 };
 
-pub const errno_t = u16;
-pub const ESUCCESS: errno_t = 0;
-pub const E2BIG: errno_t = 1;
-pub const EACCES: errno_t = 2;
-pub const EADDRINUSE: errno_t = 3;
-pub const EADDRNOTAVAIL: errno_t = 4;
-pub const EAFNOSUPPORT: errno_t = 5;
-pub const EAGAIN: errno_t = 6;
-pub const EALREADY: errno_t = 7;
-pub const EBADF: errno_t = 8;
-pub const EBADMSG: errno_t = 9;
-pub const EBUSY: errno_t = 10;
-pub const ECANCELED: errno_t = 11;
-pub const ECHILD: errno_t = 12;
-pub const ECONNABORTED: errno_t = 13;
-pub const ECONNREFUSED: errno_t = 14;
-pub const ECONNRESET: errno_t = 15;
-pub const EDEADLK: errno_t = 16;
-pub const EDESTADDRREQ: errno_t = 17;
-pub const EDOM: errno_t = 18;
-pub const EDQUOT: errno_t = 19;
-pub const EEXIST: errno_t = 20;
-pub const EFAULT: errno_t = 21;
-pub const EFBIG: errno_t = 22;
-pub const EHOSTUNREACH: errno_t = 23;
-pub const EIDRM: errno_t = 24;
-pub const EILSEQ: errno_t = 25;
-pub const EINPROGRESS: errno_t = 26;
-pub const EINTR: errno_t = 27;
-pub const EINVAL: errno_t = 28;
-pub const EIO: errno_t = 29;
-pub const EISCONN: errno_t = 30;
-pub const EISDIR: errno_t = 31;
-pub const ELOOP: errno_t = 32;
-pub const EMFILE: errno_t = 33;
-pub const EMLINK: errno_t = 34;
-pub const EMSGSIZE: errno_t = 35;
-pub const EMULTIHOP: errno_t = 36;
-pub const ENAMETOOLONG: errno_t = 37;
-pub const ENETDOWN: errno_t = 38;
-pub const ENETRESET: errno_t = 39;
-pub const ENETUNREACH: errno_t = 40;
-pub const ENFILE: errno_t = 41;
-pub const ENOBUFS: errno_t = 42;
-pub const ENODEV: errno_t = 43;
-pub const ENOENT: errno_t = 44;
-pub const ENOEXEC: errno_t = 45;
-pub const ENOLCK: errno_t = 46;
-pub const ENOLINK: errno_t = 47;
-pub const ENOMEM: errno_t = 48;
-pub const ENOMSG: errno_t = 49;
-pub const ENOPROTOOPT: errno_t = 50;
-pub const ENOSPC: errno_t = 51;
-pub const ENOSYS: errno_t = 52;
-pub const ENOTCONN: errno_t = 53;
-pub const ENOTDIR: errno_t = 54;
-pub const ENOTEMPTY: errno_t = 55;
-pub const ENOTRECOVERABLE: errno_t = 56;
-pub const ENOTSOCK: errno_t = 57;
-pub const ENOTSUP: errno_t = 58;
-pub const ENOTTY: errno_t = 59;
-pub const ENXIO: errno_t = 60;
-pub const EOVERFLOW: errno_t = 61;
-pub const EOWNERDEAD: errno_t = 62;
-pub const EPERM: errno_t = 63;
-pub const EPIPE: errno_t = 64;
-pub const EPROTO: errno_t = 65;
-pub const EPROTONOSUPPORT: errno_t = 66;
-pub const EPROTOTYPE: errno_t = 67;
-pub const ERANGE: errno_t = 68;
-pub const EROFS: errno_t = 69;
-pub const ESPIPE: errno_t = 70;
-pub const ESRCH: errno_t = 71;
-pub const ESTALE: errno_t = 72;
-pub const ETIMEDOUT: errno_t = 73;
-pub const ETXTBSY: errno_t = 74;
-pub const EXDEV: errno_t = 75;
-pub const ENOTCAPABLE: errno_t = 76;
+pub const errno_t = enum(u16) {
+    SUCCESS = 0,
+    @"2BIG" = 1,
+    ACCES = 2,
+    ADDRINUSE = 3,
+    ADDRNOTAVAIL = 4,
+    AFNOSUPPORT = 5,
+    /// This is also the error code used for `WOULDBLOCK`.
+    AGAIN = 6,
+    ALREADY = 7,
+    BADF = 8,
+    BADMSG = 9,
+    BUSY = 10,
+    CANCELED = 11,
+    CHILD = 12,
+    CONNABORTED = 13,
+    CONNREFUSED = 14,
+    CONNRESET = 15,
+    DEADLK = 16,
+    DESTADDRREQ = 17,
+    DOM = 18,
+    DQUOT = 19,
+    EXIST = 20,
+    FAULT = 21,
+    FBIG = 22,
+    HOSTUNREACH = 23,
+    IDRM = 24,
+    ILSEQ = 25,
+    INPROGRESS = 26,
+    INTR = 27,
+    INVAL = 28,
+    IO = 29,
+    ISCONN = 30,
+    ISDIR = 31,
+    LOOP = 32,
+    MFILE = 33,
+    MLINK = 34,
+    MSGSIZE = 35,
+    MULTIHOP = 36,
+    NAMETOOLONG = 37,
+    NETDOWN = 38,
+    NETRESET = 39,
+    NETUNREACH = 40,
+    NFILE = 41,
+    NOBUFS = 42,
+    NODEV = 43,
+    NOENT = 44,
+    NOEXEC = 45,
+    NOLCK = 46,
+    NOLINK = 47,
+    NOMEM = 48,
+    NOMSG = 49,
+    NOPROTOOPT = 50,
+    NOSPC = 51,
+    NOSYS = 52,
+    NOTCONN = 53,
+    NOTDIR = 54,
+    NOTEMPTY = 55,
+    NOTRECOVERABLE = 56,
+    NOTSOCK = 57,
+    /// This is also the code used for `NOTSUP`.
+    OPNOTSUPP = 58,
+    NOTTY = 59,
+    NXIO = 60,
+    OVERFLOW = 61,
+    OWNERDEAD = 62,
+    PERM = 63,
+    PIPE = 64,
+    PROTO = 65,
+    PROTONOSUPPORT = 66,
+    PROTOTYPE = 67,
+    RANGE = 68,
+    ROFS = 69,
+    SPIPE = 70,
+    SRCH = 71,
+    STALE = 72,
+    TIMEDOUT = 73,
+    TXTBSY = 74,
+    XDEV = 75,
+    NOTCAPABLE = 76,
+    _,
+};
+pub const E = errno_t;
 
 pub const event_t = extern struct {
     userdata: userdata_t,
@@ -208,7 +212,7 @@ pub const EVENTTYPE_FD_WRITE: eventtype_t = 2;
 
 pub const exitcode_t = u32;
 
-pub const fd_t = u32;
+pub const fd_t = if (builtin.link_libc) c_int else u32;
 
 pub const fdflags_t = u16;
 pub const FDFLAG_APPEND: fdflags_t = 0x0001;
@@ -275,11 +279,34 @@ pub const linkcount_t = u64;
 pub const lookupflags_t = u32;
 pub const LOOKUP_SYMLINK_FOLLOW: lookupflags_t = 0x00000001;
 
-pub const oflags_t = u16;
-pub const O_CREAT: oflags_t = 0x0001;
-pub const O_DIRECTORY: oflags_t = 0x0002;
-pub const O_EXCL: oflags_t = 0x0004;
-pub const O_TRUNC: oflags_t = 0x0008;
+pub usingnamespace if (builtin.link_libc) struct {
+    // Derived from https://github.com/WebAssembly/wasi-libc/blob/main/expected/wasm32-wasi/predefined-macros.txt
+    pub const O_ACCMODE = (O_EXEC | O_RDWR | O_SEARCH);
+    pub const O_APPEND = FDFLAG_APPEND;
+    pub const O_CLOEXEC = (0);
+    pub const O_CREAT = ((1 << 0) << 12); // = __WASI_OFLAGS_CREAT << 12
+    pub const O_DIRECTORY = ((1 << 1) << 12); // = __WASI_OFLAGS_DIRECTORY << 12
+    pub const O_DSYNC = FDFLAG_DSYNC;
+    pub const O_EXCL = ((1 << 2) << 12); // = __WASI_OFLAGS_EXCL << 12
+    pub const O_EXEC = (0x02000000);
+    pub const O_NOCTTY = (0);
+    pub const O_NOFOLLOW = (0x01000000);
+    pub const O_NONBLOCK = (1 << FDFLAG_NONBLOCK);
+    pub const O_RDONLY = (0x04000000);
+    pub const O_RDWR = (O_RDONLY | O_WRONLY);
+    pub const O_RSYNC = (1 << FDFLAG_RSYNC);
+    pub const O_SEARCH = (0x08000000);
+    pub const O_SYNC = (1 << FDFLAG_SYNC);
+    pub const O_TRUNC = ((1 << 3) << 12); // = __WASI_OFLAGS_TRUNC << 12
+    pub const O_TTY_INIT = (0);
+    pub const O_WRONLY = (0x10000000);
+} else struct {
+    pub const oflags_t = u16;
+    pub const O_CREAT: oflags_t = 0x0001;
+    pub const O_DIRECTORY: oflags_t = 0x0002;
+    pub const O_EXCL: oflags_t = 0x0004;
+    pub const O_TRUNC: oflags_t = 0x0008;
+};
 
 pub const preopentype_t = u8;
 pub const PREOPENTYPE_DIR: preopentype_t = 0;
@@ -441,3 +468,23 @@ pub const whence_t = u8;
 pub const WHENCE_SET: whence_t = 0;
 pub const WHENCE_CUR: whence_t = 1;
 pub const WHENCE_END: whence_t = 2;
+
+pub const S_IEXEC = S_IXUSR;
+pub const S_IFBLK = 0x6000;
+pub const S_IFCHR = 0x2000;
+pub const S_IFDIR = 0x4000;
+pub const S_IFIFO = 0xc000;
+pub const S_IFLNK = 0xa000;
+pub const S_IFMT = S_IFBLK | S_IFCHR | S_IFDIR | S_IFIFO | S_IFLNK | S_IFREG | S_IFSOCK;
+pub const S_IFREG = 0x8000;
+// There's no concept of UNIX domain socket but we define this value here in order to line with other OSes.
+pub const S_IFSOCK = 0x1;
+
+pub const SEEK_SET = WHENCE_SET;
+pub const SEEK_CUR = WHENCE_CUR;
+pub const SEEK_END = WHENCE_END;
+
+pub const LOCK_SH = 0x1;
+pub const LOCK_EX = 0x2;
+pub const LOCK_NB = 0x4;
+pub const LOCK_UN = 0x8;

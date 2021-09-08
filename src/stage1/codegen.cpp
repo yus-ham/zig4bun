@@ -582,7 +582,9 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
 
         bool want_ssp_attrs = g->build_mode != BuildModeFastRelease &&
                               g->build_mode != BuildModeSmallRelease &&
-                              g->link_libc;
+                              g->link_libc &&
+                              // WASI-libc does not support stack-protector yet.
+                              !target_is_wasm(g->zig_target);
         if (want_ssp_attrs) {
             addLLVMFnAttr(llvm_fn, "sspstrong");
             addLLVMFnAttrStr(llvm_fn, "stack-protector-buffer-size", "4");
@@ -3272,6 +3274,46 @@ static LLVMValueRef ir_render_bin_op(CodeGen *g, Stage1Air *executable,
             } else {
                 zig_unreachable();
             }
+        case IrBinOpSatAdd:
+            if (scalar_type->id == ZigTypeIdInt) {
+                if (scalar_type->data.integral.is_signed) {
+                    return ZigLLVMBuildSAddSat(g->builder, op1_value, op2_value, "");
+                } else {
+                    return ZigLLVMBuildUAddSat(g->builder, op1_value, op2_value, "");
+                }
+            } else {
+                zig_unreachable();
+            }
+        case IrBinOpSatSub:
+            if (scalar_type->id == ZigTypeIdInt) {
+                if (scalar_type->data.integral.is_signed) {
+                    return ZigLLVMBuildSSubSat(g->builder, op1_value, op2_value, "");
+                } else {
+                    return ZigLLVMBuildUSubSat(g->builder, op1_value, op2_value, "");
+                }
+            } else {
+                zig_unreachable();
+            }
+        case IrBinOpSatMul:
+            if (scalar_type->id == ZigTypeIdInt) {
+                if (scalar_type->data.integral.is_signed) {
+                    return ZigLLVMBuildSMulFixSat(g->builder, op1_value, op2_value, "");
+                } else {
+                    return ZigLLVMBuildUMulFixSat(g->builder, op1_value, op2_value, "");
+                }
+            } else {
+                zig_unreachable();
+            }
+        case IrBinOpSatShl:
+            if (scalar_type->id == ZigTypeIdInt) {
+                if (scalar_type->data.integral.is_signed) {
+                    return ZigLLVMBuildSShlSat(g->builder, op1_value, op2_value, "");
+                } else {
+                    return ZigLLVMBuildUShlSat(g->builder, op1_value, op2_value, "");
+                }
+            } else {
+                zig_unreachable();
+            }
     }
     zig_unreachable();
 }
@@ -3768,10 +3810,14 @@ static LLVMValueRef ir_render_load_ptr(CodeGen *g, Stage1Air *executable,
     LLVMValueRef shift_amt_val = LLVMConstInt(LLVMTypeOf(containing_int), shift_amt, false);
     LLVMValueRef shifted_value = LLVMBuildLShr(g->builder, containing_int, shift_amt_val, "");
 
+    LLVMTypeRef same_size_int = LLVMIntType(size_in_bits);
+    LLVMValueRef mask = LLVMConstAllOnes(LLVMIntType(size_in_bits));
+    mask = LLVMConstZExt(mask, LLVMTypeOf(containing_int));
+    LLVMValueRef masked_value = LLVMBuildAnd(g->builder, shifted_value, mask, "");
+
     if (handle_is_ptr(g, child_type)) {
         LLVMValueRef result_loc = ir_llvm_value(g, instruction->result_loc);
-        LLVMTypeRef same_size_int = LLVMIntType(size_in_bits);
-        LLVMValueRef truncated_int = LLVMBuildTrunc(g->builder, shifted_value, same_size_int, "");
+        LLVMValueRef truncated_int = LLVMBuildTrunc(g->builder, masked_value, same_size_int, "");
         LLVMValueRef bitcasted_ptr = LLVMBuildBitCast(g->builder, result_loc,
                                                       LLVMPointerType(same_size_int, 0), "");
         LLVMBuildStore(g->builder, truncated_int, bitcasted_ptr);
@@ -3779,12 +3825,11 @@ static LLVMValueRef ir_render_load_ptr(CodeGen *g, Stage1Air *executable,
     }
 
     if (child_type->id == ZigTypeIdFloat) {
-        LLVMTypeRef same_size_int = LLVMIntType(size_in_bits);
-        LLVMValueRef truncated_int = LLVMBuildTrunc(g->builder, shifted_value, same_size_int, "");
+        LLVMValueRef truncated_int = LLVMBuildTrunc(g->builder, masked_value, same_size_int, "");
         return LLVMBuildBitCast(g->builder, truncated_int, get_llvm_type(g, child_type), "");
     }
 
-    return LLVMBuildTrunc(g->builder, shifted_value, get_llvm_type(g, child_type), "");
+    return LLVMBuildTrunc(g->builder, masked_value, get_llvm_type(g, child_type), "");
 }
 
 static bool value_is_all_undef_array(CodeGen *g, ZigValue *const_val, size_t len) {
@@ -9019,6 +9064,10 @@ static void define_builtin_fns(CodeGen *g) {
     create_builtin_fn(g, BuiltinFnIdReduce, "reduce", 2);
     create_builtin_fn(g, BuiltinFnIdMaximum, "maximum", 2);
     create_builtin_fn(g, BuiltinFnIdMinimum, "minimum", 2);
+    create_builtin_fn(g, BuiltinFnIdSatAdd, "addWithSaturation", 2);
+    create_builtin_fn(g, BuiltinFnIdSatSub, "subWithSaturation", 2);
+    create_builtin_fn(g, BuiltinFnIdSatMul, "mulWithSaturation", 2);
+    create_builtin_fn(g, BuiltinFnIdSatShl, "shlWithSaturation", 2);
 }
 
 static const char *bool_to_str(bool b) {

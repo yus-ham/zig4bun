@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 pub const mach_header = extern struct {
     magic: u32,
     cputype: cpu_type_t,
@@ -115,6 +110,21 @@ pub const build_tool_version = extern struct {
     /// version number of the tool
     version: u32,
 };
+
+pub const PLATFORM_MACOS: u32 = 0x1;
+pub const PLATFORM_IOS: u32 = 0x2;
+pub const PLATFORM_TVOS: u32 = 0x3;
+pub const PLATFORM_WATCHOS: u32 = 0x4;
+pub const PLATFORM_BRIDGEOS: u32 = 0x5;
+pub const PLATFORM_MACCATALYST: u32 = 0x6;
+pub const PLATFORM_IOSSIMULATOR: u32 = 0x7;
+pub const PLATFORM_TVOSSIMULATOR: u32 = 0x8;
+pub const PLATFORM_WATCHOSSIMULATOR: u32 = 0x9;
+pub const PLATFORM_DRIVERKIT: u32 = 0x10;
+
+pub const TOOL_CLANG: u32 = 0x1;
+pub const TOOL_SWIFT: u32 = 0x2;
+pub const TOOL_LD: u32 = 0x3;
 
 /// The entry_point_command is a replacement for thread_command.
 /// It is used for main executables to specify the location (file offset)

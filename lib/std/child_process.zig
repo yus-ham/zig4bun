@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const cstr = std.cstr;
 const unicode = std.unicode;
@@ -836,12 +831,12 @@ pub const ChildProcess = struct {
 
             const app_name = self.argv[0];
 
-            var it = mem.tokenize(PATH, ";");
+            var it = mem.tokenize(u8, PATH, ";");
             retry: while (it.next()) |search_path| {
                 const path_no_ext = try fs.path.join(self.allocator, &[_][]const u8{ search_path, app_name });
                 defer self.allocator.free(path_no_ext);
 
-                var ext_it = mem.tokenize(PATHEXT, ";");
+                var ext_it = mem.tokenize(u8, PATHEXT, ";");
                 while (ext_it.next()) |app_ext| {
                     const joined_path = try mem.concat(self.allocator, u8, &[_][]const u8{ path_no_ext, app_ext });
                     defer self.allocator.free(joined_path);
