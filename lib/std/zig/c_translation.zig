@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
-
 const std = @import("std");
 const testing = std.testing;
 const math = std.math;
@@ -403,6 +397,10 @@ pub const Macros = struct {
             .Fn => return a(b),
             else => unreachable, // return type will be a compile error otherwise
         }
+    }
+
+    pub inline fn DISCARD(x: anytype) void {
+        _ = x;
     }
 };
 

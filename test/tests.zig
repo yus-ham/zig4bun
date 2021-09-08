@@ -57,6 +57,14 @@ const test_targets = blk: {
             .link_libc = false,
             .single_threaded = true,
         },
+        TestTarget{
+            .target = .{
+                .cpu_arch = .wasm32,
+                .os_tag = .wasi,
+            },
+            .link_libc = true,
+            .single_threaded = true,
+        },
 
         TestTarget{
             .target = .{
@@ -125,6 +133,14 @@ const test_targets = blk: {
             .target = .{
                 .cpu_arch = .aarch64,
                 .os_tag = .linux,
+                .abi = .gnu,
+            },
+            .link_libc = true,
+        },
+        TestTarget{
+            .target = .{
+                .cpu_arch = .aarch64,
+                .os_tag = .windows,
                 .abi = .gnu,
             },
             .link_libc = true,
@@ -152,24 +168,22 @@ const test_targets = blk: {
         //    .link_libc = true,
         //},
 
-        // https://github.com/ziglang/zig/issues/8155
-        //TestTarget{
-        //    .target = .{
-        //        .cpu_arch = .mips,
-        //        .os_tag = .linux,
-        //        .abi = .none,
-        //    },
-        //},
+        TestTarget{
+            .target = .{
+                .cpu_arch = .mips,
+                .os_tag = .linux,
+                .abi = .none,
+            },
+        },
 
-        // https://github.com/ziglang/zig/issues/8155
-        //TestTarget{
-        //    .target = .{
-        //        .cpu_arch = .mips,
-        //        .os_tag = .linux,
-        //        .abi = .musl,
-        //    },
-        //    .link_libc = true,
-        //},
+        TestTarget{
+            .target = .{
+                .cpu_arch = .mips,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+            .link_libc = true,
+        },
 
         // https://github.com/ziglang/zig/issues/4927
         //TestTarget{
@@ -181,24 +195,22 @@ const test_targets = blk: {
         //    .link_libc = true,
         //},
 
-        // https://github.com/ziglang/zig/issues/8155
-        //TestTarget{
-        //    .target = .{
-        //        .cpu_arch = .mipsel,
-        //        .os_tag = .linux,
-        //        .abi = .none,
-        //    },
-        //},
+        TestTarget{
+            .target = .{
+                .cpu_arch = .mipsel,
+                .os_tag = .linux,
+                .abi = .none,
+            },
+        },
 
-        // https://github.com/ziglang/zig/issues/8155
-        //TestTarget{
-        //    .target = .{
-        //        .cpu_arch = .mipsel,
-        //        .os_tag = .linux,
-        //        .abi = .musl,
-        //    },
-        //    .link_libc = true,
-        //},
+        TestTarget{
+            .target = .{
+                .cpu_arch = .mipsel,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+            .link_libc = true,
+        },
 
         // https://github.com/ziglang/zig/issues/4927
         //TestTarget{
@@ -768,7 +780,7 @@ pub const StackTracesContext = struct {
                 var buf = ArrayList(u8).init(b.allocator);
                 defer buf.deinit();
                 if (stderr.len != 0 and stderr[stderr.len - 1] == '\n') stderr = stderr[0 .. stderr.len - 1];
-                var it = mem.split(stderr, "\n");
+                var it = mem.split(u8, stderr, "\n");
                 process_lines: while (it.next()) |line| {
                     if (line.len == 0) continue;
 

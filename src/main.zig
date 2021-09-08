@@ -6,7 +6,7 @@ const mem = std.mem;
 const process = std.process;
 const Allocator = mem.Allocator;
 const ArrayList = std.ArrayList;
-const ast = std.zig.ast;
+const Ast = std.zig.Ast;
 const warn = std.log.warn;
 
 const Compilation = @import("Compilation.zig");
@@ -589,6 +589,10 @@ fn buildOutputType(
     var linker_bind_global_refs_locally: ?bool = null;
     var linker_z_nodelete = false;
     var linker_z_defs = false;
+    var linker_z_origin = false;
+    var linker_z_noexecstack = false;
+    var linker_z_now = false;
+    var linker_z_relro = false;
     var linker_tsaware = false;
     var linker_nxcompat = false;
     var linker_dynamicbase = false;
@@ -830,7 +834,10 @@ fn buildOutputType(
                     } else if (mem.eql(u8, arg, "-D") or
                         mem.eql(u8, arg, "-isystem") or
                         mem.eql(u8, arg, "-I") or
-                        mem.eql(u8, arg, "-dirafter"))
+                        mem.eql(u8, arg, "-dirafter") or
+                        mem.eql(u8, arg, "-iwithsysroot") or
+                        mem.eql(u8, arg, "-iframework") or
+                        mem.eql(u8, arg, "-iframeworkwithsysroot"))
                     {
                         if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
                         i += 1;
@@ -873,6 +880,8 @@ fn buildOutputType(
                         if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
                         i += 1;
                         sysroot = args[i];
+                        try clang_argv.append("-isysroot");
+                        try clang_argv.append(args[i]);
                     } else if (mem.eql(u8, arg, "--libc")) {
                         if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
                         i += 1;
@@ -1200,7 +1209,7 @@ fn buildOutputType(
                     },
                     .rdynamic => rdynamic = true,
                     .wl => {
-                        var split_it = mem.split(it.only_arg, ",");
+                        var split_it = mem.split(u8, it.only_arg, ",");
                         while (split_it.next()) |linker_arg| {
                             // Handle nested-joined args like `-Wl,-rpath=foo`.
                             // Must be prefixed with 1 or 2 dashes.
@@ -1388,6 +1397,14 @@ fn buildOutputType(
                         linker_z_nodelete = true;
                     } else if (mem.eql(u8, z_arg, "defs")) {
                         linker_z_defs = true;
+                    } else if (mem.eql(u8, z_arg, "origin")) {
+                        linker_z_origin = true;
+                    } else if (mem.eql(u8, z_arg, "noexecstack")) {
+                        linker_z_noexecstack = true;
+                    } else if (mem.eql(u8, z_arg, "now")) {
+                        linker_z_now = true;
+                    } else if (mem.eql(u8, z_arg, "relro")) {
+                        linker_z_relro = true;
                     } else {
                         warn("unsupported linker arg: -z {s}", .{z_arg});
                     }
@@ -1576,39 +1593,11 @@ fn buildOutputType(
         }
     };
 
-    var diags: std.zig.CrossTarget.ParseOptions.Diagnostics = .{};
-    const cross_target = std.zig.CrossTarget.parse(.{
+    const cross_target = try parseCrossTargetOrReportFatalError(arena, .{
         .arch_os_abi = target_arch_os_abi,
         .cpu_features = target_mcpu,
         .dynamic_linker = target_dynamic_linker,
-        .diagnostics = &diags,
-    }) catch |err| switch (err) {
-        error.UnknownCpuModel => {
-            help: {
-                var help_text = std.ArrayList(u8).init(arena);
-                for (diags.arch.?.allCpuModels()) |cpu| {
-                    help_text.writer().print(" {s}\n", .{cpu.name}) catch break :help;
-                }
-                std.log.info("Available CPUs for architecture '{s}':\n{s}", .{
-                    @tagName(diags.arch.?), help_text.items,
-                });
-            }
-            fatal("Unknown CPU: '{s}'", .{diags.cpu_name.?});
-        },
-        error.UnknownCpuFeature => {
-            help: {
-                var help_text = std.ArrayList(u8).init(arena);
-                for (diags.arch.?.allFeaturesList()) |feature| {
-                    help_text.writer().print(" {s}: {s}\n", .{ feature.name, feature.description }) catch break :help;
-                }
-                std.log.info("Available CPU features for architecture '{s}':\n{s}", .{
-                    @tagName(diags.arch.?), help_text.items,
-                });
-            }
-            fatal("Unknown CPU feature: '{s}'", .{diags.unknown_feature_name});
-        },
-        else => |e| return e,
-    };
+    });
 
     const target_info = try detectNativeTargetInfo(gpa, cross_target);
 
@@ -1673,7 +1662,9 @@ fn buildOutputType(
             want_native_include_dirs = true;
     }
 
-    if (sysroot == null and cross_target.isNativeOs() and
+    const is_darwin_on_darwin = (comptime std.Target.current.isDarwin()) and cross_target.isDarwin();
+
+    if (sysroot == null and (cross_target.isNativeOs() or is_darwin_on_darwin) and
         (system_libs.items.len != 0 or want_native_include_dirs))
     {
         const paths = std.zig.system.NativePaths.detect(arena, target_info) catch |err| {
@@ -1684,16 +1675,18 @@ fn buildOutputType(
         }
 
         const has_sysroot = if (comptime std.Target.current.isDarwin()) outer: {
-            const min = target_info.target.os.getVersionRange().semver.min;
-            const at_least_mojave = min.major >= 11 or (min.major >= 10 and min.minor >= 14);
-            if (at_least_mojave) {
-                const sdk_path = try std.zig.system.getSDKPath(arena);
+            const should_get_sdk_path = if (cross_target.isNativeOs() and target_info.target.os.tag == .macos) inner: {
+                const min = target_info.target.os.getVersionRange().semver.min;
+                const at_least_mojave = min.major >= 11 or (min.major >= 10 and min.minor >= 14);
+                break :inner at_least_mojave;
+            } else true;
+            if (!should_get_sdk_path) break :outer false;
+            if (try std.zig.system.darwin.getSDKPath(arena, target_info.target)) |sdk_path| {
                 try clang_argv.ensureCapacity(clang_argv.items.len + 2);
                 clang_argv.appendAssumeCapacity("-isysroot");
                 clang_argv.appendAssumeCapacity(sdk_path);
                 break :outer true;
-            }
-            break :outer false;
+            } else break :outer false;
         } else false;
 
         try clang_argv.ensureCapacity(clang_argv.items.len + paths.include_dirs.items.len * 2);
@@ -1951,7 +1944,7 @@ fn buildOutputType(
     defer if (libc_installation) |*l| l.deinit(gpa);
 
     if (libc_paths_file) |paths_file| {
-        libc_installation = LibCInstallation.parse(gpa, paths_file) catch |err| {
+        libc_installation = LibCInstallation.parse(gpa, paths_file, cross_target) catch |err| {
             fatal("unable to parse libc paths file at path {s}: {s}", .{ paths_file, @errorName(err) });
         };
     }
@@ -2068,6 +2061,10 @@ fn buildOutputType(
         .linker_bind_global_refs_locally = linker_bind_global_refs_locally,
         .linker_z_nodelete = linker_z_nodelete,
         .linker_z_defs = linker_z_defs,
+        .linker_z_origin = linker_z_origin,
+        .linker_z_noexecstack = linker_z_noexecstack,
+        .linker_z_now = linker_z_now,
+        .linker_z_relro = linker_z_relro,
         .linker_tsaware = linker_tsaware,
         .linker_nxcompat = linker_nxcompat,
         .linker_dynamicbase = linker_dynamicbase,
@@ -2262,6 +2259,43 @@ fn buildOutputType(
     }
     // Skip resource deallocation in release builds; let the OS do it.
     return cleanExit();
+}
+
+fn parseCrossTargetOrReportFatalError(allocator: *Allocator, opts: std.zig.CrossTarget.ParseOptions) !std.zig.CrossTarget {
+    var opts_with_diags = opts;
+    var diags: std.zig.CrossTarget.ParseOptions.Diagnostics = .{};
+    if (opts_with_diags.diagnostics == null) {
+        opts_with_diags.diagnostics = &diags;
+    }
+    return std.zig.CrossTarget.parse(opts_with_diags) catch |err| switch (err) {
+        error.UnknownCpuModel => {
+            help: {
+                var help_text = std.ArrayList(u8).init(allocator);
+                defer help_text.deinit();
+                for (diags.arch.?.allCpuModels()) |cpu| {
+                    help_text.writer().print(" {s}\n", .{cpu.name}) catch break :help;
+                }
+                std.log.info("Available CPUs for architecture '{s}':\n{s}", .{
+                    @tagName(diags.arch.?), help_text.items,
+                });
+            }
+            fatal("Unknown CPU: '{s}'", .{diags.cpu_name.?});
+        },
+        error.UnknownCpuFeature => {
+            help: {
+                var help_text = std.ArrayList(u8).init(allocator);
+                defer help_text.deinit();
+                for (diags.arch.?.allFeaturesList()) |feature| {
+                    help_text.writer().print(" {s}: {s}\n", .{ feature.name, feature.description }) catch break :help;
+                }
+                std.log.info("Available CPU features for architecture '{s}':\n{s}", .{
+                    @tagName(diags.arch.?), help_text.items,
+                });
+            }
+            fatal("Unknown CPU feature: '{s}'", .{diags.unknown_feature_name});
+        },
+        else => |e| return e,
+    };
 }
 
 fn runOrTest(
@@ -2483,6 +2517,7 @@ fn cmdTranslateC(comp: *Compilation, arena: *Allocator, enable_cache: bool) !voi
 
     const digest = if (try man.hit()) man.final() else digest: {
         var argv = std.ArrayList([]const u8).init(arena);
+        try argv.append(""); // argv[0] is program name, actual args start at [1]
 
         var zig_cache_tmp_dir = try comp.local_cache_directory.handle.makeOpenPath("tmp", .{});
         defer zig_cache_tmp_dir.close();
@@ -2604,10 +2639,15 @@ pub const usage_libc =
     \\
     \\    Parse a libc installation text file and validate it.
     \\
+    \\Options:
+    \\    -h, --help             Print this help and exit
+    \\    -target [name]         <arch><sub>-<os>-<abi> see the targets command
+    \\
 ;
 
 pub fn cmdLibC(gpa: *Allocator, args: []const []const u8) !void {
     var input_file: ?[]const u8 = null;
+    var target_arch_os_abi: []const u8 = "native";
     {
         var i: usize = 0;
         while (i < args.len) : (i += 1) {
@@ -2617,6 +2657,10 @@ pub fn cmdLibC(gpa: *Allocator, args: []const []const u8) !void {
                     const stdout = io.getStdOut().writer();
                     try stdout.writeAll(usage_libc);
                     return cleanExit();
+                } else if (mem.eql(u8, arg, "-target")) {
+                    if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
+                    i += 1;
+                    target_arch_os_abi = args[i];
                 } else {
                     fatal("unrecognized parameter: '{s}'", .{arg});
                 }
@@ -2627,12 +2671,21 @@ pub fn cmdLibC(gpa: *Allocator, args: []const []const u8) !void {
             }
         }
     }
+
+    const cross_target = try parseCrossTargetOrReportFatalError(gpa, .{
+        .arch_os_abi = target_arch_os_abi,
+    });
+
     if (input_file) |libc_file| {
-        var libc = LibCInstallation.parse(gpa, libc_file) catch |err| {
+        var libc = LibCInstallation.parse(gpa, libc_file, cross_target) catch |err| {
             fatal("unable to parse libc file at path {s}: {s}", .{ libc_file, @errorName(err) });
         };
         defer libc.deinit(gpa);
     } else {
+        if (!cross_target.isNative()) {
+            fatal("unable to detect libc for non-native target", .{});
+        }
+
         var libc = LibCInstallation.findNative(.{
             .allocator = gpa,
             .verbose = true,
@@ -3413,8 +3466,8 @@ fn fmtPathFile(
 fn printErrMsgToStdErr(
     gpa: *mem.Allocator,
     arena: *mem.Allocator,
-    parse_error: ast.Error,
-    tree: ast.Tree,
+    parse_error: Ast.Error,
+    tree: Ast,
     path: []const u8,
     color: Color,
 ) !void {
@@ -3655,7 +3708,7 @@ pub const ClangArgIterator = struct {
             defer allocator.free(resp_contents);
             // TODO is there a specification for this file format? Let's find it and make this parsing more robust
             // at the very least I'm guessing this needs to handle quotes and `#` comments.
-            var it = mem.tokenize(resp_contents, " \t\r\n");
+            var it = mem.tokenize(u8, resp_contents, " \t\r\n");
             var resp_arg_list = std.ArrayList([]const u8).init(allocator);
             defer resp_arg_list.deinit();
             {
@@ -3818,7 +3871,7 @@ fn parseCodeModel(arg: []const u8) std.builtin.CodeModel {
 /// garbage collector to run concurrently to zig processes, and to allow multiple
 /// zig processes to run concurrently with each other, without clobbering each other.
 fn gimmeMoreOfThoseSweetSweetFileDescriptors() void {
-    if (!@hasDecl(std.os, "rlimit")) return;
+    if (!@hasDecl(std.os.system, "rlimit")) return;
     const posix = std.os;
 
     var lim = posix.getrlimit(.NOFILE) catch return; // Oh well; we tried.
@@ -3826,7 +3879,7 @@ fn gimmeMoreOfThoseSweetSweetFileDescriptors() void {
         // On Darwin, `NOFILE` is bounded by a hardcoded value `OPEN_MAX`.
         // According to the man pages for setrlimit():
         //   setrlimit() now returns with errno set to EINVAL in places that historically succeeded.
-        //   It no longer accepts "rlim_cur = RLIM_INFINITY" for RLIM_NOFILE.
+        //   It no longer accepts "rlim_cur = RLIM.INFINITY" for RLIM.NOFILE.
         //   Use "rlim_cur = min(OPEN_MAX, rlim_max)".
         lim.max = std.math.min(std.os.darwin.OPEN_MAX, lim.max);
     }
@@ -3836,7 +3889,7 @@ fn gimmeMoreOfThoseSweetSweetFileDescriptors() void {
     var min: posix.rlim_t = lim.cur;
     var max: posix.rlim_t = 1 << 20;
     // But if there's a defined upper bound, don't search, just set it.
-    if (lim.max != posix.RLIM_INFINITY) {
+    if (lim.max != posix.RLIM.INFINITY) {
         min = lim.max;
         max = lim.max;
     }
@@ -4019,12 +4072,12 @@ pub fn cmdAstCheck(
     }
 
     {
-        const token_bytes = @sizeOf(std.zig.ast.TokenList) +
-            file.tree.tokens.len * (@sizeOf(std.zig.Token.Tag) + @sizeOf(std.zig.ast.ByteOffset));
-        const tree_bytes = @sizeOf(std.zig.ast.Tree) + file.tree.nodes.len *
-            (@sizeOf(std.zig.ast.Node.Tag) +
-            @sizeOf(std.zig.ast.Node.Data) +
-            @sizeOf(std.zig.ast.TokenIndex));
+        const token_bytes = @sizeOf(Ast.TokenList) +
+            file.tree.tokens.len * (@sizeOf(std.zig.Token.Tag) + @sizeOf(Ast.ByteOffset));
+        const tree_bytes = @sizeOf(Ast) + file.tree.nodes.len *
+            (@sizeOf(Ast.Node.Tag) +
+            @sizeOf(Ast.Node.Data) +
+            @sizeOf(Ast.TokenIndex));
         const instruction_bytes = file.zir.instructions.len *
             // Here we don't use @sizeOf(Zir.Inst.Data) because it would include
             // the debug safety tag but we want to measure release size.
