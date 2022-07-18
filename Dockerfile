@@ -64,10 +64,10 @@ WORKDIR /output
 ARG TAG "jul7-2"
 
 # Compile zig
-RUN cmake . -DCMAKE_BUILD_TYPE=Release && \
+RUN  mkdir build; cd build; cmake .. -DCMAKE_BUILD_TYPE=Release && \
     make -j$(nproc) && \
     rm -rf .git; 
 
 FROM scratch as artifact
 
-COPY --from=zig /output /
+COPY --from=zig /output/build /

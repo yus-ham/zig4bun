@@ -37,8 +37,8 @@ jobs:
           prerelease: true
           title: "Head Build"
           files: |
-            zig-linux-${{matrix.arch}}.tar.gz
+            /tmp/zig-linux-${{matrix.arch}}.tar.gz
       - uses: actions/upload-artifact@v3
         with:
           name: zig-linux-${{matrix.arch}}
-          path: /tmp/zig
+          path: /zig-linux-${{matrix.arch}}.tar.gz
