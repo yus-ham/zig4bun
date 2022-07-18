@@ -1,4 +1,6 @@
 name: CI
+jobs:
+  build:
 
 # Controls when the workflow will run
 on:
