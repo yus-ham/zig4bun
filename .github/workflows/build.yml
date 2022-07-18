@@ -74,3 +74,34 @@ jobs:
         with:
           name: zig-macos-${{matrix.arch}}
           path: /tmp/zig-macos-${{matrix.arch}}.tar.gz
+
+  release:
+    name: Release
+    runs-on: ubuntu-18.04
+    timeout-minutes: 90
+    needs:
+      - linux_amd64
+      - macos
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          name: zig-linux-amd64.tar.gz
+          path: /tmp/zig-linux-amd64.tar.gz
+      - uses: actions/download-artifact@v3
+        with:
+          name: zig-macos-x86_64.tar.gz
+          path: /tmp/zig-macos-x86_64.tar.gz
+      - uses: actions/download-artifact@v3
+        with:
+          name: zig-macos-aarch64.tar.gz
+          path: /tmp/zig-macos-aarch64.tar.gz
+      - uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          automatic_release_tag: "latest"
+          prerelease: true
+          title: "Latest"
+          files: |
+            - /tmp/zig-linux-amd64.tar.gz
+            - /tmp/zig-macos-x86_64.tar.gz
+            - /tmp/zig-macos-aarch64.tar.gz
