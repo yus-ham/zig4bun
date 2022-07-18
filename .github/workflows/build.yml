@@ -27,9 +27,9 @@ jobs:
           install: true
       - name: Run
         run: |
-          docker buildx build -f Dockerfile --progress=plain --platform=linux/{{matrix.arch}} --target=artifact --output type=local,dest=/tmp/zig .
+          docker buildx build -f Dockerfile --progress=plain --platform=linux/${{matrix.arch}} --target=artifact --output type=local,dest=/tmp/zig .
           cd /tmp
-          tar -czf zig-linux-{{matrix.arch}}.tar.gz zig
+          tar -czf zig-linux-${{matrix.arch}}.tar.gz zig
       - uses: "marvinpinto/action-automatic-releases@latest"
         with:
           repo_token: "${{ secrets.GITHUB_TOKEN }}"
@@ -37,8 +37,8 @@ jobs:
           prerelease: true
           title: "Head Build"
           files: |
-            zig-linux-{{matrix.arch}}.tar.gz
+            zig-linux-${{matrix.arch}}.tar.gz
       - uses: actions/upload-artifact@v3
         with:
-          name: zig-linux-{{matrix.arch}}
+          name: zig-linux-${{matrix.arch}}
           path: /tmp/zig
