@@ -128,16 +128,14 @@ ENV CXXFLAGS=" -I/usr/include -I/usr/include/llvm13"
 ENV PATH="/usr/glibc-compat/bin/:/usr/bin:/usr/local/bin:/zig/bin:$PATH"
 
 
-RUN mkdir /output;
+COPY . /output
 WORKDIR /output
 ARG TAG "jul7-2"
 
 # Compile zig
 RUN cmake . -DCMAKE_BUILD_TYPE=Release && \
     make -j$(nproc) && \
-    rm -rf .git; \
-    cd /output; \
-    echo "${TAG}" > /output/.zig-version; 
+    rm -rf .git; 
 
 FROM scratch as artifact
 
