@@ -30,15 +30,47 @@ jobs:
           docker buildx build -f Dockerfile --progress=plain --platform=linux/${{matrix.arch}} --target=artifact --output type=local,dest=/tmp/zig .
           cd /tmp
           tar -czf zig-linux-${{matrix.arch}}.tar.gz zig
-      - uses: "marvinpinto/action-automatic-releases@latest"
-        with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          automatic_release_tag: "latest"
-          prerelease: true
-          title: "Head Build"
-          files: |
-            /tmp/zig-linux-${{matrix.arch}}.tar.gz
       - uses: actions/upload-artifact@v3
         with:
           name: zig-linux-${{matrix.arch}}
           path: /zig-linux-${{matrix.arch}}.tar.gz
+  macos:
+    name: macOS
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      matrix:
+        os: [macos-11]
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v3
+      - name: PATH
+        run: |
+          echo "/usr/local/opt/llvm@13/bin" >> $GITHUB_PATH
+          brew install llvm@13 python icu4c ninja
+          brew link llvm@13 --overwrite
+      - name: Run
+        env:
+          LDFLAGS: "-L/usr/local/opt/llvm@13/lib"
+          CPPFLAGS: "-I/usr/local/opt/llvm@13/include"
+          ICU_INCLUDE_DIRS: /usr/local/opt/icu4c/include
+          CC: "/usr/local/opt/llvm@13/bin/clang"
+          CXX: "/usr/local/opt/llvm@13/bin/clang++"
+          CMAKE_C_COMPILER: "/usr/local/opt/llvm@13/bin/clang"
+          CMAKE_CXX_COMPILER: "/usr/local/opt/llvm@13/bin/clang++"
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -DZIG_STATIC_LLVM=on -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=${{matrix.arch}}
+          make -j$(nproc)
+          cd ..
+          mkdir /tmp/zig-macos-${{matrix.arch}}
+          cp build/zig* /tmp/zig-macos-${{matrix.arch}}
+          cp -r lib /tmp/zig-macos-${{matrix.arch}}
+          cd /tmp
+          tar -czf zig-macos-${{matrix.arch}}.tar.gz /tmp/zig-macos-${{matrix.arch}}
+      - uses: actions/upload-artifact@v3
+        name: Upload
+        with:
+          name: zig-macos-${{matrix.arch}}
+          path: /tmp/zig-macos-${{matrix.arch}}.tar.gz
