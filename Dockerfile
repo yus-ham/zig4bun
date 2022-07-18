@@ -71,3 +71,4 @@ RUN  mkdir build; cd build; cmake .. -DCMAKE_BUILD_TYPE=Release && \
 FROM scratch as artifact
 
 COPY --from=zig /output/build /
+COPY --from=zig /output/lib /lib
