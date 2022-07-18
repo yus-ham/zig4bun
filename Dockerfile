@@ -139,4 +139,4 @@ RUN cmake . -DCMAKE_BUILD_TYPE=Release && \
 
 FROM scratch as artifact
 
-COPY --from=zig /output/zig /
+COPY --from=zig /output /
