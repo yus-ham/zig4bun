@@ -139,6 +139,6 @@ RUN cmake . -DCMAKE_BUILD_TYPE=Release && \
     cd /output; \
     echo "${TAG}" > /output/.zig-version; 
 
-FROM scratch as build
+FROM scratch as artifact
 
 COPY --from=zig /output/zig /
