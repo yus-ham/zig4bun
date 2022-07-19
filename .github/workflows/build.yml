@@ -10,89 +10,71 @@ on:
   workflow_dispatch:
 
 jobs:
-  linux_amd64:
-    name: Linux AMD64
-    runs-on: ${{ matrix.os }}
+  build:
+    name: Build
+    runs-on: self-hosted
     timeout-minutes: 90
     strategy:
       matrix:
-        os: [ubuntu-18.04]
-        arch: [amd64]
-
+        os: [linux-gnu, macos-none]
+        arch: [x86_64, arm64]
     steps:
       - uses: actions/checkout@v3
-      - uses: docker/setup-buildx-action@v2
-        id: buildx
         with:
-          install: true
-      - name: Run
-        run: |
-          docker buildx build -f Dockerfile --progress=plain --platform=linux/${{matrix.arch}} --target=artifact --output type=local,dest=/tmp/zig .
-          cd /tmp
-          tar -czf zig-linux-${{matrix.arch}}.tar.gz zig
-      - uses: actions/upload-artifact@v3
-        with:
-          name: zig-linux-${{matrix.arch}}
-          path: /zig-linux-${{matrix.arch}}.tar.gz
-  macos:
-    name: macOS
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    strategy:
-      matrix:
-        os: [macos-11]
-        arch: [x86_64, aarch64]
-    steps:
+          repository: ziglang/zig-bootstrap
+          ref: c46035de775405d0916e227528f24a78c3c2391d
       - uses: actions/checkout@v3
-      - name: PATH
-        run: |
-          echo "/usr/local/opt/llvm@13/bin" >> $GITHUB_PATH
-          brew install llvm@13 python icu4c ninja
-          brew link llvm@13 --overwrite
+        with:
+          path: zig
       - name: Run
-        env:
-          ICU_INCLUDE_DIRS: /usr/local/opt/icu4c/include
-          CC: "/usr/local/opt/llvm@13/bin/clang"
-          CXX: "/usr/local/opt/llvm@13/bin/clang++"
-          CMAKE_C_COMPILER: "/usr/local/opt/llvm@13/bin/clang"
-          CMAKE_CXX_COMPILER: "/usr/local/opt/llvm@13/bin/clang++"
         run: |
-          mkdir -p build
-          cd build
-          cmake .. -DZIG_STATIC_LLVM=on -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=${{matrix.arch}}
-          make -j$(nproc)
-          cd ..
-          mkdir /tmp/zig-macos-${{matrix.arch}}
-          cp build/zig* /tmp/zig-macos-${{matrix.arch}}
-          cp -r lib /tmp/zig-macos-${{matrix.arch}}
-          cd /tmp
-          tar -czf zig-macos-${{matrix.arch}}.tar.gz /tmp/zig-macos-${{matrix.arch}}
+          ./build -j$(ncpus) ${{matrix.arch}}-${{matrix.os}} baseline
+          mv out/${{matrix.arch}}-${{matrix.os}} /tmp/zig
       - uses: actions/upload-artifact@v3
         name: Upload
         with:
-          name: zig-macos-${{matrix.arch}}
-          path: /tmp/zig-macos-${{matrix.arch}}.tar.gz
-
+          name: zig-${{matrix.os}}-${{matrix.arch}}
+          path: /tmp/zig
   release:
     name: Release
-    runs-on: ubuntu-18.04
+    runs-on: self-hosted
     timeout-minutes: 90
-    needs:
-      - linux_amd64
-      - macos
+    needs: build
     steps:
       - uses: actions/download-artifact@v3
         with:
-          name: zig-linux-amd64.tar.gz
-          path: /tmp/zig-linux-amd64.tar.gz
+          name: zig-linux-gnu-x86_64
+          path: /tmp/zig-linux-gnu-x86_64/zig.zip
       - uses: actions/download-artifact@v3
         with:
-          name: zig-macos-x86_64.tar.gz
-          path: /tmp/zig-macos-x86_64.tar.gz
+          name: zig-linux-gnu-aarch64
+          path: /tmp/zig-linux-gnu-aarch64/zig.zip
       - uses: actions/download-artifact@v3
         with:
-          name: zig-macos-aarch64.tar.gz
-          path: /tmp/zig-macos-aarch64.tar.gz
+          name: zig-macos-none-x86_64
+          path: /tmp/zig-macos-none-x86_64/zig.zip
+      - uses: actions/download-artifact@v3
+        with:
+          name: zig-macos-none-aarch64
+          path: /tmp/zig-macos-none-aarch64/zig.zip
+      - name: convert
+        run: |
+          cd /tmp/zig-linux-gnu-x86_64
+          unzip zig-linux-gnu-x86_64.zip
+          tar -czf zig-linux-gnu-x86_64.tar.gz zig
+
+          cd /tmp/zig-linux-gnu-aarch64
+          unzip zig-linux-gnu-aarch64.zip
+          tar -czf zig-linux-gnu-aarch64.tar.gz zig
+
+          cd /tmp/zig-macos-none-x86_64
+          unzip zig-macos-none-x86_64.zip
+          tar -czf zig-macos-none-x86_64.tar.gz zig
+
+          cd /tmp/zig-macos-none-aarch64
+          unzip zig-macos-none-aarch64.zip
+          tar -czf zig-macos-none-aarch64.tar.gz zig
+
       - uses: "marvinpinto/action-automatic-releases@latest"
         with:
           repo_token: "${{ secrets.GITHUB_TOKEN }}"
@@ -100,6 +82,7 @@ jobs:
           prerelease: true
           title: "Latest"
           files: |
-            - /tmp/zig-linux-amd64.tar.gz
-            - /tmp/zig-macos-x86_64.tar.gz
-            - /tmp/zig-macos-aarch64.tar.gz
+            - /tmp/zig-linux-gnu-x86_64/zig-linux-gnu-x86_64.tar.gz
+            - /tmp/zig-linux-gnu-aarch64/zig-linux-gnu-aarch64.tar.gz
+            - /tmp/zig-macos-none-x86_64/zig-macos-none-x86_64.tar.gz
+            - /tmp/zig-macos-none-aarch64/zig-macos-none-aarch64.tar.gz
